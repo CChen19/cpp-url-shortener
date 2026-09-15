@@ -100,3 +100,33 @@ add_executable(test_http_protocol
 )
 
 add_test(NAME http_protocol COMMAND test_http_protocol)
+
+add_executable(test_local_cache
+    tests/test_local_cache.cpp
+    shorturl/short_url_cache.cpp
+    shorturl/singleflight.cpp
+    shorturl/bloom_filter.cpp
+    shorturl/short_url_repository.cpp
+    shorturl/shard_router.cpp
+    config/config.cpp
+    observability/metrics_registry.cpp
+    CGImysql/sql_connection_pool.cpp
+    log/log.cpp
+)
+
+target_link_libraries(test_local_cache
+    Threads::Threads
+    mysqlclient
+    yaml-cpp
+)
+
+if (REDIS_PLUS_PLUS_INCLUDE_DIR AND REDIS_PLUS_PLUS_LIBRARY AND HIREDIS_LIBRARY)
+    target_compile_definitions(test_local_cache PRIVATE HAVE_REDIS_PLUS_PLUS)
+    target_include_directories(test_local_cache PRIVATE ${REDIS_PLUS_PLUS_INCLUDE_DIR})
+    target_link_libraries(test_local_cache
+        ${REDIS_PLUS_PLUS_LIBRARY}
+        ${HIREDIS_LIBRARY}
+    )
+endif()
+
+add_test(NAME local_cache COMMAND test_local_cache)
