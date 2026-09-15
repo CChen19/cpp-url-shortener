@@ -1,5 +1,7 @@
 # C++ URL Shortener
 
+English | [简体中文](README_zh-CN.md)
+
 A production-style C++ short URL service evolved from
 [qinguoyi/TinyWebServer](https://github.com/qinguoyi/TinyWebServer).
 
