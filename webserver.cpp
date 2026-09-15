@@ -32,7 +32,18 @@ void WebServer::init(const Config &cfg)
     m_OPT_LINGER = cfg.opt_linger ? 1 : 0;
     m_TRIGMode = cfg.trig_mode;
     m_close_log = cfg.close_log;
-    m_actormodel = cfg.actor_model;
+    // Single I/O model: main-thread socket I/O (former "proactor"). Reactor
+    // busy-waited on improv and raced the event loop; refuse to keep that fork.
+    if (cfg.actor_model == 1)
+    {
+        fprintf(stderr,
+                "actor_model=1 (reactor) is disabled; coercing to 0 (main-thread I/O)\n");
+        m_actormodel = 0;
+    }
+    else
+    {
+        m_actormodel = cfg.actor_model;
+    }
 }
 
 void WebServer::trig_mode()
@@ -83,7 +94,7 @@ void WebServer::sql_pool()
 
 void WebServer::thread_pool()
 {
-    m_pool = new threadpool<http_conn>(m_actormodel, m_thread_num);
+    m_pool = new threadpool<http_conn>(m_thread_num);
 }
 
 void WebServer::eventListen()
@@ -147,6 +158,7 @@ void WebServer::timer(int connfd, struct sockaddr_in client_address)
 
     users_timer[connfd].address = client_address;
     users_timer[connfd].sockfd = connfd;
+    users_timer[connfd].conn = &users[connfd];
     util_timer *timer = new util_timer;
     timer->user_data = &users_timer[connfd];
     timer->cb_func = cb_func;
@@ -167,11 +179,17 @@ void WebServer::adjust_timer(util_timer *timer)
 
 void WebServer::deal_timer(util_timer *timer, int sockfd)
 {
-    timer->cb_func(&users_timer[sockfd]);
+    // Event-loop closer: invalidate+epoll_del+close via cb_func (bumps generation).
     if (timer)
     {
+        timer->cb_func(&users_timer[sockfd]);
         utils.m_timer_lst.del_timer(timer);
     }
+    else
+    {
+        cb_func(&users_timer[sockfd]);
+    }
+    users_timer[sockfd].timer = NULL;
 
     LOG_INFO("close fd %d", users_timer[sockfd].sockfd);
 }
@@ -260,111 +278,47 @@ void WebServer::dealwithread(int sockfd)
 {
     util_timer *timer = users_timer[sockfd].timer;
 
-    //reactor
-    if (1 == m_actormodel)
+    // Main-thread I/O: event loop owns recv; workers only process().
+    if (users[sockfd].read_once())
     {
-        if (timer)
-        {
-            adjust_timer(timer);
-        }
+        LOG_INFO("deal with the client(%s)", inet_ntoa(users[sockfd].get_address()->sin_addr));
 
-        if (!m_pool->append(users + sockfd, 0))
+        const uint64_t gen = users[sockfd].current_generation();
+        if (!m_pool->append_p(users + sockfd, gen))
         {
-            LOG_ERROR("thread pool queue full on read, closing fd %d", sockfd);
+            LOG_ERROR("thread pool queue full on read, rejecting fd %d", sockfd);
             users[sockfd].reject_overload();
             deal_timer(timer, sockfd);
             return;
         }
 
-        while (true)
+        if (timer)
         {
-            if (1 == users[sockfd].improv)
-            {
-                if (1 == users[sockfd].timer_flag)
-                {
-                    deal_timer(timer, sockfd);
-                    users[sockfd].timer_flag = 0;
-                }
-                users[sockfd].improv = 0;
-                break;
-            }
+            adjust_timer(timer);
         }
     }
     else
     {
-        //proactor
-        if (users[sockfd].read_once())
-        {
-            LOG_INFO("deal with the client(%s)", inet_ntoa(users[sockfd].get_address()->sin_addr));
-
-            if (!m_pool->append_p(users + sockfd))
-            {
-                LOG_ERROR("thread pool queue full on read, rejecting fd %d", sockfd);
-                users[sockfd].reject_overload();
-                deal_timer(timer, sockfd);
-                return;
-            }
-
-            if (timer)
-            {
-                adjust_timer(timer);
-            }
-        }
-        else
-        {
-            deal_timer(timer, sockfd);
-        }
+        deal_timer(timer, sockfd);
     }
 }
 
 void WebServer::dealwithwrite(int sockfd)
 {
     util_timer *timer = users_timer[sockfd].timer;
-    //reactor
-    if (1 == m_actormodel)
+    // Main-thread I/O: event loop owns send.
+    if (users[sockfd].write())
     {
+        LOG_INFO("send data to the client(%s)", inet_ntoa(users[sockfd].get_address()->sin_addr));
+
         if (timer)
         {
             adjust_timer(timer);
         }
-
-        if (!m_pool->append(users + sockfd, 1))
-        {
-            LOG_ERROR("thread pool queue full on write, closing fd %d", sockfd);
-            deal_timer(timer, sockfd);
-            return;
-        }
-
-        while (true)
-        {
-            if (1 == users[sockfd].improv)
-            {
-                if (1 == users[sockfd].timer_flag)
-                {
-                    deal_timer(timer, sockfd);
-                    users[sockfd].timer_flag = 0;
-                }
-                users[sockfd].improv = 0;
-                break;
-            }
-        }
     }
     else
     {
-        //proactor
-        if (users[sockfd].write())
-        {
-            LOG_INFO("send data to the client(%s)", inet_ntoa(users[sockfd].get_address()->sin_addr));
-
-            if (timer)
-            {
-                adjust_timer(timer);
-            }
-        }
-        else
-        {
-            deal_timer(timer, sockfd);
-        }
+        deal_timer(timer, sockfd);
     }
 }
 

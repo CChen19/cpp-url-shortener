@@ -16,6 +16,8 @@
 #include <stdarg.h>
 #include <errno.h>
 #include <sys/uio.h>
+#include <atomic>
+#include <cstdint>
 
 #include "../lock/locker.h"
 #include "../CGImysql/sql_connection_pool.h"
@@ -61,13 +63,18 @@ public:
     };
 
 public:
-    http_conn() {}
+    http_conn() : m_generation(0), m_pending_close(false) {}
     ~http_conn() {}
 
 public:
     void init(int sockfd, const sockaddr_in &addr, int TRIGMode, int close_log);
-    void close_conn(bool real_close = true);
-    void process();
+    // Invalidate the slot so in-flight worker results for an old generation are ignored.
+    // Does not close the fd; the event loop (cb_func / deal_timer) is the only closer.
+    void invalidate();
+    uint64_t current_generation() const;
+    bool generation_matches(uint64_t expected) const;
+    // Worker entry: applies EPOLL arming only if expected still matches.
+    void process(uint64_t expected_generation);
     bool read_once();
     bool write();
     // Best-effort 503 for queue-full on the event-loop thread; caller closes fd.
@@ -76,8 +83,6 @@ public:
     {
         return &m_address;
     }
-    int timer_flag;
-    int improv;
 
 public:
     static int m_epollfd;
@@ -121,6 +126,14 @@ private:
 
     int m_TRIGMode;
     int m_close_log;
+
+    // Bumped on accept/init and on timeout/close; enqueue captures it for workers.
+    std::atomic<uint64_t> m_generation;
+    // Set by a worker when the response cannot be buffered; event-loop write() closes.
+    bool m_pending_close;
+
+    // Arm EPOLLIN/EPOLLOUT only while the connection generation still matches.
+    bool arm_epoll_if_current(uint64_t expected_generation, int ev);
 };
 
 #endif

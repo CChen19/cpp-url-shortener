@@ -4,7 +4,7 @@ server:
   thread_num: 8
   trig_mode: 0          # 0=LT+LT, 1=LT+ET, 2=ET+LT, 3=ET+ET
   opt_linger: false
-  actor_model: 0        # 0=proactor, 1=reactor
+  actor_model: 0        # 0=main-thread I/O (only supported). 1=reactor is coerced to 0 at startup.
 
 log:
   enabled: true

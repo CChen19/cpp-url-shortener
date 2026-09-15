@@ -51,15 +51,32 @@ void modfd(int epollfd, int fd, int ev, int TRIGMode)
 int http_conn::m_user_count = 0;
 int http_conn::m_epollfd = -1;
 
-void http_conn::close_conn(bool real_close)
+uint64_t http_conn::current_generation() const
 {
-    if (real_close && (m_sockfd != -1))
+    return m_generation.load(std::memory_order_acquire);
+}
+
+bool http_conn::generation_matches(uint64_t expected) const
+{
+    return current_generation() == expected;
+}
+
+void http_conn::invalidate()
+{
+    // Bump first so any in-flight worker fails generation_matches before fd reuse.
+    m_generation.fetch_add(1, std::memory_order_acq_rel);
+    m_pending_close = false;
+    m_sockfd = -1;
+}
+
+bool http_conn::arm_epoll_if_current(uint64_t expected_generation, int ev)
+{
+    if (!generation_matches(expected_generation) || m_sockfd < 0)
     {
-        printf("close %d\n", m_sockfd);
-        removefd(m_epollfd, m_sockfd);
-        m_sockfd = -1;
-        m_user_count--;
+        return false;
     }
+    modfd(m_epollfd, m_sockfd, ev, m_TRIGMode);
+    return generation_matches(expected_generation);
 }
 
 void http_conn::reject_overload()
@@ -94,6 +111,8 @@ void http_conn::init(int sockfd, const sockaddr_in &addr, int TRIGMode, int clos
     addfd(m_epollfd, sockfd, true, m_TRIGMode);
     m_user_count++;
 
+    // New connection identity for this fd/slot; stale worker results must not apply.
+    m_generation.fetch_add(1, std::memory_order_acq_rel);
     init();
 }
 
@@ -114,8 +133,7 @@ void http_conn::init()
     m_read_idx = 0;
     m_write_idx = 0;
     m_state = 0;
-    timer_flag = 0;
-    improv = 0;
+    m_pending_close = false;
     m_request = HttpRequest{};
     memset(m_read_buf, '\0', READ_BUFFER_SIZE);
     memset(m_write_buf, '\0', WRITE_BUFFER_SIZE);
@@ -376,6 +394,12 @@ bool http_conn::write()
 {
     int temp = 0;
 
+    if (m_pending_close)
+    {
+        m_pending_close = false;
+        return false;
+    }
+
     if (bytes_to_send == 0)
     {
         modfd(m_epollfd, m_sockfd, EPOLLIN, m_TRIGMode);
@@ -419,13 +443,18 @@ bool http_conn::write()
     }
 }
 
-void http_conn::process()
+void http_conn::process(uint64_t expected_generation)
 {
+    if (!generation_matches(expected_generation))
+    {
+        return;
+    }
+
     const auto started_at = std::chrono::steady_clock::now();
     HTTP_CODE read_ret = process_read();
     if (read_ret == NO_REQUEST)
     {
-        modfd(m_epollfd, m_sockfd, EPOLLIN, m_TRIGMode);
+        arm_epoll_if_current(expected_generation, EPOLLIN);
         return;
     }
 
@@ -471,10 +500,20 @@ void http_conn::process()
         duration_seconds * 1000.0,
         inet_ntoa(m_address.sin_addr));
 
-    if (!process_write(resp))
+    if (!generation_matches(expected_generation))
     {
-        close_conn();
         return;
     }
-    modfd(m_epollfd, m_sockfd, EPOLLOUT, m_TRIGMode);
+
+    if (!process_write(resp))
+    {
+        // Do not close from the worker; ask the event loop to close via write().
+        if (generation_matches(expected_generation) && m_sockfd >= 0)
+        {
+            m_pending_close = true;
+            arm_epoll_if_current(expected_generation, EPOLLOUT);
+        }
+        return;
+    }
+    arm_epoll_if_current(expected_generation, EPOLLOUT);
 }

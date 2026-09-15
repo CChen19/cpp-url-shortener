@@ -84,3 +84,13 @@ target_link_libraries(test_mysql_pool_timeout
 )
 
 add_test(NAME mysql_pool_timeout COMMAND test_mysql_pool_timeout)
+
+add_executable(test_conn_generation
+    tests/test_conn_generation.cpp
+)
+
+target_link_libraries(test_conn_generation
+    Threads::Threads
+)
+
+add_test(NAME conn_generation COMMAND test_conn_generation)
