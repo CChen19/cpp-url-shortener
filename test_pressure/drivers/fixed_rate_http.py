@@ -21,6 +21,16 @@ from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Sequence, Tuple
 
 
+class _NoRedirectHandler(urllib.request.HTTPRedirectHandler):
+    """Record the first hop; never follow Location (needed for short-URL 302)."""
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):  # noqa: ANN001
+        raise urllib.error.HTTPError(req.full_url, code, msg, headers, fp)
+
+
+_NO_REDIRECT_OPENER = urllib.request.build_opener(_NoRedirectHandler())
+
+
 @dataclass
 class Sample:
     status: int
@@ -45,7 +55,10 @@ class Summary:
             idx = min(len(lat) - 1, max(0, int(math.ceil(p / 100.0 * len(lat)) - 1)))
             return round(lat[idx], 3)
 
+        # Denominator is completed (finished attempts), not requested (scheduled).
+        # Under overload, requested may exceed completed while workers drain.
         completed = max(1, self.completed)
+        requested = max(1, self.requested)
         return {
             "driver": "fixed_rate_http.py",
             "target_rate_rps": rate,
@@ -56,6 +69,9 @@ class Summary:
             "transport_errors": self.transport_errors,
             "timeout_rate": round(self.timed_out / completed, 6),
             "error_rate": round(self.transport_errors / completed, 6),
+            "timeout_rate_of_requested": round(self.timed_out / requested, 6),
+            "error_rate_of_requested": round(self.transport_errors / requested, 6),
+            "rate_denominator": "completed (also report *_of_requested)",
             "status_counts": {str(k): v for k, v in sorted(self.by_status.items())},
             "correct_status_throughput_rps": {
                 str(k): round(v / duration_s, 3) for k, v in sorted(self.by_status.items())
@@ -148,7 +164,8 @@ def one_request(
         req.add_header(k, v)
     t0 = time.perf_counter()
     try:
-        with urllib.request.urlopen(req, timeout=timeout_s) as resp:
+        # Do not follow Location: short-URL success is first-hop 302, not dest 200.
+        with _NO_REDIRECT_OPENER.open(req, timeout=timeout_s) as resp:
             resp.read()
             status = getattr(resp, "status", resp.getcode())
             return Sample(status=int(status), latency_ms=(time.perf_counter() - t0) * 1000.0)

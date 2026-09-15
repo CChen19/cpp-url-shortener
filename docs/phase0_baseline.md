@@ -23,7 +23,16 @@ Canonical assumptions: [business_assumptions.md](business_assumptions.md).
 ## Primary vs secondary load
 
 - **Primary:** fixed arrival rate (open-loop). Default driver: `test_pressure/drivers/fixed_rate_http.py`. Also acceptable: vegeta or wrk2 if installed.
+- The driver **does not follow `Location`**; first-hop statuses (`302`/`201`/`404`/`410`/`503`) are recorded as-is.
+- Under overload, if the scheduler falls behind the target interval it **skips forward** (does not burst catch-up traffic).
+- `timeout_rate` / `error_rate` use **completed** attempts as the denominator; the JSON also reports `*_of_requested`.
 - **Secondary:** webbench / wrk closed-loop concurrency sweeps. Useful for historical comparison only. **webbench `pages/min` is not QPS** (see [phase1_baseline.md](phase1_baseline.md)).
+
+Self-check (no server deps):
+
+```bash
+python3 test_pressure/tools/test_no_redirect.py
+```
 
 ## How to run
 
