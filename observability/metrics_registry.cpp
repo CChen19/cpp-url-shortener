@@ -1,6 +1,8 @@
 #include "metrics_registry.h"
+#include <functional>
 #include <iomanip>
 #include <sstream>
+#include <thread>
 
 namespace {
 
@@ -16,6 +18,13 @@ std::string status_class(int status) {
     return "unknown";
 }
 
+void add_map(std::map<std::string, uint64_t>& dst,
+             const std::map<std::string, uint64_t>& src) {
+    for (const auto& item : src) {
+        dst[item.first] += item.second;
+    }
+}
+
 } // namespace
 
 MetricsRegistry& MetricsRegistry::instance() {
@@ -23,147 +32,219 @@ MetricsRegistry& MetricsRegistry::instance() {
     return registry;
 }
 
-MetricsRegistry::MetricsRegistry()
-    : http_latency_buckets_(), http_latency_count_(0), http_latency_sum_(0.0),
-      kafka_publish_success_(0), kafka_publish_failure_(0),
-      kafka_enqueue_accepted_(0), kafka_enqueue_dropped_(0),
-      kafka_produce_accepted_(0), kafka_produce_failed_(0),
-      kafka_delivered_(0), kafka_delivery_failed_(0),
-      log_enqueue_accepted_(0), log_enqueue_dropped_(0) {}
+MetricsRegistry::MetricsRegistry() = default;
+
+MetricsRegistry::Shard& MetricsRegistry::shard_for_this_thread() {
+    const size_t idx =
+        std::hash<std::thread::id>{}(std::this_thread::get_id()) % kShardCount;
+    return shards_[idx];
+}
 
 void MetricsRegistry::observe_http_request(const std::string& method,
                                            const std::string& route,
                                            int status,
                                            double duration_seconds) {
-    std::lock_guard<std::mutex> guard(mutex_);
+    Shard& shard = shard_for_this_thread();
+    std::lock_guard<std::mutex> guard(shard.mutex);
     const std::string key = method + "|" + route + "|" + status_class(status);
-    http_requests_[key]++;
+    shard.http_requests[key]++;
     for (size_t i = 0; i < sizeof(kLatencyBuckets) / sizeof(kLatencyBuckets[0]); ++i) {
         if (duration_seconds <= kLatencyBuckets[i]) {
-            http_latency_buckets_[i]++;
+            shard.http_latency_buckets[i]++;
         }
     }
-    http_latency_buckets_[http_latency_buckets_.size() - 1]++;
-    http_latency_count_++;
-    http_latency_sum_ += duration_seconds;
+    shard.http_latency_buckets[shard.http_latency_buckets.size() - 1]++;
+    shard.http_latency_count++;
+    shard.http_latency_sum += duration_seconds;
 }
 
 void MetricsRegistry::observe_cache_result(const std::string& result) {
-    std::lock_guard<std::mutex> guard(mutex_);
-    cache_results_[result]++;
+    Shard& shard = shard_for_this_thread();
+    std::lock_guard<std::mutex> guard(shard.mutex);
+    shard.cache_results[result]++;
 }
 
 void MetricsRegistry::observe_kafka_publish(bool success) {
-    std::lock_guard<std::mutex> guard(mutex_);
+    Shard& shard = shard_for_this_thread();
+    std::lock_guard<std::mutex> guard(shard.mutex);
     if (success) {
-        kafka_publish_success_++;
+        shard.kafka_publish_success++;
     } else {
-        kafka_publish_failure_++;
+        shard.kafka_publish_failure++;
     }
 }
 
 void MetricsRegistry::observe_kafka_enqueue(bool accepted) {
-    std::lock_guard<std::mutex> guard(mutex_);
+    Shard& shard = shard_for_this_thread();
+    std::lock_guard<std::mutex> guard(shard.mutex);
     if (accepted) {
-        kafka_enqueue_accepted_++;
-        kafka_publish_success_++;
+        shard.kafka_enqueue_accepted++;
+        shard.kafka_publish_success++;
     } else {
-        kafka_enqueue_dropped_++;
-        kafka_publish_failure_++;
+        shard.kafka_enqueue_dropped++;
+        shard.kafka_publish_failure++;
     }
 }
 
 void MetricsRegistry::observe_kafka_produce_accepted(bool ok) {
-    std::lock_guard<std::mutex> guard(mutex_);
+    Shard& shard = shard_for_this_thread();
+    std::lock_guard<std::mutex> guard(shard.mutex);
     if (ok) {
-        kafka_produce_accepted_++;
+        shard.kafka_produce_accepted++;
     } else {
-        kafka_produce_failed_++;
+        shard.kafka_produce_failed++;
     }
 }
 
 void MetricsRegistry::observe_kafka_delivery(bool success) {
-    std::lock_guard<std::mutex> guard(mutex_);
+    Shard& shard = shard_for_this_thread();
+    std::lock_guard<std::mutex> guard(shard.mutex);
     if (success) {
-        kafka_delivered_++;
+        shard.kafka_delivered++;
     } else {
-        kafka_delivery_failed_++;
+        shard.kafka_delivery_failed++;
     }
 }
 
 void MetricsRegistry::observe_log_enqueue(bool accepted) {
-    std::lock_guard<std::mutex> guard(mutex_);
+    Shard& shard = shard_for_this_thread();
+    std::lock_guard<std::mutex> guard(shard.mutex);
     if (accepted) {
-        log_enqueue_accepted_++;
+        shard.log_enqueue_accepted++;
     } else {
-        log_enqueue_dropped_++;
+        shard.log_enqueue_dropped++;
     }
 }
 
 void MetricsRegistry::observe_origin_cap(const std::string& kind, bool acquired) {
-    std::lock_guard<std::mutex> guard(mutex_);
+    Shard& shard = shard_for_this_thread();
+    std::lock_guard<std::mutex> guard(shard.mutex);
     if (acquired) {
-        origin_cap_acquired_[kind]++;
+        shard.origin_cap_acquired[kind]++;
     } else {
-        origin_cap_rejected_[kind]++;
+        shard.origin_cap_rejected[kind]++;
     }
 }
 
 uint64_t MetricsRegistry::kafka_enqueue_dropped() const {
-    std::lock_guard<std::mutex> guard(mutex_);
-    return kafka_enqueue_dropped_;
+    uint64_t total = 0;
+    for (const auto& shard : shards_) {
+        std::lock_guard<std::mutex> guard(shard.mutex);
+        total += shard.kafka_enqueue_dropped;
+    }
+    return total;
 }
 
 uint64_t MetricsRegistry::kafka_produce_accepted() const {
-    std::lock_guard<std::mutex> guard(mutex_);
-    return kafka_produce_accepted_;
+    uint64_t total = 0;
+    for (const auto& shard : shards_) {
+        std::lock_guard<std::mutex> guard(shard.mutex);
+        total += shard.kafka_produce_accepted;
+    }
+    return total;
 }
 
 uint64_t MetricsRegistry::kafka_delivered() const {
-    std::lock_guard<std::mutex> guard(mutex_);
-    return kafka_delivered_;
+    uint64_t total = 0;
+    for (const auto& shard : shards_) {
+        std::lock_guard<std::mutex> guard(shard.mutex);
+        total += shard.kafka_delivered;
+    }
+    return total;
 }
 
 uint64_t MetricsRegistry::log_enqueue_dropped() const {
-    std::lock_guard<std::mutex> guard(mutex_);
-    return log_enqueue_dropped_;
+    uint64_t total = 0;
+    for (const auto& shard : shards_) {
+        std::lock_guard<std::mutex> guard(shard.mutex);
+        total += shard.log_enqueue_dropped;
+    }
+    return total;
 }
 
 uint64_t MetricsRegistry::origin_cap_rejected(const std::string& kind) const {
-    std::lock_guard<std::mutex> guard(mutex_);
-    auto it = origin_cap_rejected_.find(kind);
-    return it == origin_cap_rejected_.end() ? 0 : it->second;
+    uint64_t total = 0;
+    for (const auto& shard : shards_) {
+        std::lock_guard<std::mutex> guard(shard.mutex);
+        auto it = shard.origin_cap_rejected.find(kind);
+        if (it != shard.origin_cap_rejected.end()) {
+            total += it->second;
+        }
+    }
+    return total;
 }
 
 void MetricsRegistry::reset_for_test() {
-    std::lock_guard<std::mutex> guard(mutex_);
-    http_requests_.clear();
-    http_latency_buckets_.fill(0);
-    http_latency_count_ = 0;
-    http_latency_sum_ = 0.0;
-    cache_results_.clear();
-    kafka_publish_success_ = 0;
-    kafka_publish_failure_ = 0;
-    kafka_enqueue_accepted_ = 0;
-    kafka_enqueue_dropped_ = 0;
-    kafka_produce_accepted_ = 0;
-    kafka_produce_failed_ = 0;
-    kafka_delivered_ = 0;
-    kafka_delivery_failed_ = 0;
-    log_enqueue_accepted_ = 0;
-    log_enqueue_dropped_ = 0;
-    origin_cap_acquired_.clear();
-    origin_cap_rejected_.clear();
+    for (auto& shard : shards_) {
+        std::lock_guard<std::mutex> guard(shard.mutex);
+        shard.http_requests.clear();
+        shard.http_latency_buckets.fill(0);
+        shard.http_latency_count = 0;
+        shard.http_latency_sum = 0.0;
+        shard.cache_results.clear();
+        shard.kafka_publish_success = 0;
+        shard.kafka_publish_failure = 0;
+        shard.kafka_enqueue_accepted = 0;
+        shard.kafka_enqueue_dropped = 0;
+        shard.kafka_produce_accepted = 0;
+        shard.kafka_produce_failed = 0;
+        shard.kafka_delivered = 0;
+        shard.kafka_delivery_failed = 0;
+        shard.log_enqueue_accepted = 0;
+        shard.log_enqueue_dropped = 0;
+        shard.origin_cap_acquired.clear();
+        shard.origin_cap_rejected.clear();
+    }
 }
 
 std::string MetricsRegistry::render_prometheus() {
-    std::lock_guard<std::mutex> guard(mutex_);
+    std::map<std::string, uint64_t> http_requests;
+    std::array<uint64_t, 13> http_latency_buckets{};
+    uint64_t http_latency_count = 0;
+    double http_latency_sum = 0.0;
+    std::map<std::string, uint64_t> cache_results;
+    uint64_t kafka_publish_success = 0;
+    uint64_t kafka_publish_failure = 0;
+    uint64_t kafka_enqueue_accepted = 0;
+    uint64_t kafka_enqueue_dropped = 0;
+    uint64_t kafka_produce_accepted = 0;
+    uint64_t kafka_produce_failed = 0;
+    uint64_t kafka_delivered = 0;
+    uint64_t kafka_delivery_failed = 0;
+    uint64_t log_enqueue_accepted = 0;
+    uint64_t log_enqueue_dropped = 0;
+    std::map<std::string, uint64_t> origin_cap_acquired;
+    std::map<std::string, uint64_t> origin_cap_rejected;
+
+    for (const auto& shard : shards_) {
+        std::lock_guard<std::mutex> guard(shard.mutex);
+        add_map(http_requests, shard.http_requests);
+        for (size_t i = 0; i < http_latency_buckets.size(); ++i) {
+            http_latency_buckets[i] += shard.http_latency_buckets[i];
+        }
+        http_latency_count += shard.http_latency_count;
+        http_latency_sum += shard.http_latency_sum;
+        add_map(cache_results, shard.cache_results);
+        kafka_publish_success += shard.kafka_publish_success;
+        kafka_publish_failure += shard.kafka_publish_failure;
+        kafka_enqueue_accepted += shard.kafka_enqueue_accepted;
+        kafka_enqueue_dropped += shard.kafka_enqueue_dropped;
+        kafka_produce_accepted += shard.kafka_produce_accepted;
+        kafka_produce_failed += shard.kafka_produce_failed;
+        kafka_delivered += shard.kafka_delivered;
+        kafka_delivery_failed += shard.kafka_delivery_failed;
+        log_enqueue_accepted += shard.log_enqueue_accepted;
+        log_enqueue_dropped += shard.log_enqueue_dropped;
+        add_map(origin_cap_acquired, shard.origin_cap_acquired);
+        add_map(origin_cap_rejected, shard.origin_cap_rejected);
+    }
+
     std::ostringstream out;
     out << std::fixed << std::setprecision(6);
 
     out << "# HELP shorturl_http_requests_total Total HTTP requests by route and status class.\n";
     out << "# TYPE shorturl_http_requests_total counter\n";
-    for (const auto& item : http_requests_) {
+    for (const auto& item : http_requests) {
         size_t first = item.first.find('|');
         size_t second = item.first.find('|', first + 1);
         std::map<std::string, std::string> label_values = {
@@ -180,17 +261,17 @@ std::string MetricsRegistry::render_prometheus() {
     for (size_t i = 0; i < sizeof(kLatencyBuckets) / sizeof(kLatencyBuckets[0]); ++i) {
         out << "shorturl_http_request_duration_seconds_bucket"
             << labels({{"le", std::to_string(kLatencyBuckets[i])}})
-            << " " << http_latency_buckets_[i] << "\n";
+            << " " << http_latency_buckets[i] << "\n";
     }
     out << "shorturl_http_request_duration_seconds_bucket"
         << labels({{"le", "+Inf"}}) << " "
-        << http_latency_buckets_[http_latency_buckets_.size() - 1] << "\n";
-    out << "shorturl_http_request_duration_seconds_sum " << http_latency_sum_ << "\n";
-    out << "shorturl_http_request_duration_seconds_count " << http_latency_count_ << "\n";
+        << http_latency_buckets[http_latency_buckets.size() - 1] << "\n";
+    out << "shorturl_http_request_duration_seconds_sum " << http_latency_sum << "\n";
+    out << "shorturl_http_request_duration_seconds_count " << http_latency_count << "\n";
 
     out << "# HELP shorturl_cache_requests_total Cache lookups by result.\n";
     out << "# TYPE shorturl_cache_requests_total counter\n";
-    for (const auto& item : cache_results_) {
+    for (const auto& item : cache_results) {
         out << "shorturl_cache_requests_total"
             << labels({{"result", item.first}})
             << " " << item.second << "\n";
@@ -200,46 +281,46 @@ std::string MetricsRegistry::render_prometheus() {
            "(accepted vs dropped/unavailable; not zero-loss).\n";
     out << "# TYPE shorturl_kafka_publish_total counter\n";
     out << "shorturl_kafka_publish_total" << labels({{"result", "success"}})
-        << " " << kafka_publish_success_ << "\n";
+        << " " << kafka_publish_success << "\n";
     out << "shorturl_kafka_publish_total" << labels({{"result", "failure"}})
-        << " " << kafka_publish_failure_ << "\n";
+        << " " << kafka_publish_failure << "\n";
 
     out << "# HELP shorturl_kafka_enqueue_total Bounded click-queue enqueue results.\n";
     out << "# TYPE shorturl_kafka_enqueue_total counter\n";
     out << "shorturl_kafka_enqueue_total" << labels({{"result", "accepted"}})
-        << " " << kafka_enqueue_accepted_ << "\n";
+        << " " << kafka_enqueue_accepted << "\n";
     out << "shorturl_kafka_enqueue_total" << labels({{"result", "dropped"}})
-        << " " << kafka_enqueue_dropped_ << "\n";
+        << " " << kafka_enqueue_dropped << "\n";
 
     out << "# HELP shorturl_kafka_produce_total Background rd_kafka_producev accept/fail.\n";
     out << "# TYPE shorturl_kafka_produce_total counter\n";
     out << "shorturl_kafka_produce_total" << labels({{"result", "accepted"}})
-        << " " << kafka_produce_accepted_ << "\n";
+        << " " << kafka_produce_accepted << "\n";
     out << "shorturl_kafka_produce_total" << labels({{"result", "failed"}})
-        << " " << kafka_produce_failed_ << "\n";
+        << " " << kafka_produce_failed << "\n";
 
     out << "# HELP shorturl_kafka_delivery_total Kafka delivery-report callback outcomes.\n";
     out << "# TYPE shorturl_kafka_delivery_total counter\n";
     out << "shorturl_kafka_delivery_total" << labels({{"result", "success"}})
-        << " " << kafka_delivered_ << "\n";
+        << " " << kafka_delivered << "\n";
     out << "shorturl_kafka_delivery_total" << labels({{"result", "failure"}})
-        << " " << kafka_delivery_failed_ << "\n";
+        << " " << kafka_delivery_failed << "\n";
 
     out << "# HELP shorturl_log_enqueue_total Bounded structured-log queue enqueue results.\n";
     out << "# TYPE shorturl_log_enqueue_total counter\n";
     out << "shorturl_log_enqueue_total" << labels({{"result", "accepted"}})
-        << " " << log_enqueue_accepted_ << "\n";
+        << " " << log_enqueue_accepted << "\n";
     out << "shorturl_log_enqueue_total" << labels({{"result", "dropped"}})
-        << " " << log_enqueue_dropped_ << "\n";
+        << " " << log_enqueue_dropped << "\n";
 
     out << "# HELP shorturl_origin_cap_total MySQL origin budget acquire results when Redis is down.\n";
     out << "# TYPE shorturl_origin_cap_total counter\n";
-    for (const auto& item : origin_cap_acquired_) {
+    for (const auto& item : origin_cap_acquired) {
         out << "shorturl_origin_cap_total"
             << labels({{"kind", item.first}, {"result", "acquired"}})
             << " " << item.second << "\n";
     }
-    for (const auto& item : origin_cap_rejected_) {
+    for (const auto& item : origin_cap_rejected) {
         out << "shorturl_origin_cap_total"
             << labels({{"kind", item.first}, {"result", "rejected"}})
             << " " << item.second << "\n";
