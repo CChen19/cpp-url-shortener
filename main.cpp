@@ -24,6 +24,7 @@ int main(int argc, char *argv[])
     StructuredLogger::instance().init(config);
     ShortUrlCache::instance().init(config);
     ClickEventProducer::instance().init(config);
+    init_short_url_handler(config);
     register_health_routes();
     register_metrics_routes();
     register_short_url_routes();

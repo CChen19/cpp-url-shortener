@@ -34,6 +34,7 @@ public:
     void trig_mode();
     void eventListen();
     void eventLoop();
+    void shutdown();
     void timer(int connfd, struct sockaddr_in client_address);
     void adjust_timer(util_timer *timer);
     void deal_timer(util_timer *timer, int sockfd);

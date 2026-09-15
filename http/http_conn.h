@@ -29,8 +29,9 @@
 class http_conn
 {
 public:
-    static const int READ_BUFFER_SIZE = 2048;
-    static const int WRITE_BUFFER_SIZE = 4096;
+    // Large enough for create: headers + JSON wrapping a 2KB long_url.
+    static const int READ_BUFFER_SIZE = 8192;
+    static const int WRITE_BUFFER_SIZE = 8192;
 
     enum METHOD
     {
@@ -52,6 +53,7 @@ public:
         NO_REQUEST,
         GET_REQUEST,
         BAD_REQUEST,
+        REQUEST_ENTITY_TOO_LARGE,
         INTERNAL_ERROR,
         CLOSED_CONNECTION
     };

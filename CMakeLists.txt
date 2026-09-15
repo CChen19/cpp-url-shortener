@@ -94,3 +94,9 @@ target_link_libraries(test_conn_generation
 )
 
 add_test(NAME conn_generation COMMAND test_conn_generation)
+
+add_executable(test_http_protocol
+    tests/test_http_protocol.cpp
+)
+
+add_test(NAME http_protocol COMMAND test_http_protocol)
