@@ -26,6 +26,8 @@ public:
     std::string mysql_password;
     std::string mysql_database;
     int mysql_pool_size;
+    // Max wait when borrowing a pool connection (ms). Default 50.
+    int mysql_acquire_timeout_ms;
 
     bool redis_enabled;
     std::string redis_uri;

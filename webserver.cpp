@@ -26,6 +26,7 @@ void WebServer::init(const Config &cfg)
     m_sql_num = cfg.mysql_pool_size;
     m_mysql_host = cfg.mysql_host;
     m_mysql_port = cfg.mysql_port;
+    m_mysql_acquire_timeout_ms = cfg.mysql_acquire_timeout_ms;
     m_thread_num = cfg.thread_num;
     m_log_write = cfg.log_async ? 1 : 0;
     m_OPT_LINGER = cfg.opt_linger ? 1 : 0;
@@ -77,11 +78,12 @@ void WebServer::sql_pool()
 {
     m_connPool = connection_pool::GetInstance();
     m_connPool->init(m_mysql_host, m_user, m_passWord, m_databaseName, m_mysql_port, m_sql_num, m_close_log);
+    m_connPool->set_acquire_timeout_ms(m_mysql_acquire_timeout_ms);
 }
 
 void WebServer::thread_pool()
 {
-    m_pool = new threadpool<http_conn>(m_actormodel, m_connPool, m_thread_num);
+    m_pool = new threadpool<http_conn>(m_actormodel, m_thread_num);
 }
 
 void WebServer::eventListen()
@@ -266,7 +268,13 @@ void WebServer::dealwithread(int sockfd)
             adjust_timer(timer);
         }
 
-        m_pool->append(users + sockfd, 0);
+        if (!m_pool->append(users + sockfd, 0))
+        {
+            LOG_ERROR("thread pool queue full on read, closing fd %d", sockfd);
+            users[sockfd].reject_overload();
+            deal_timer(timer, sockfd);
+            return;
+        }
 
         while (true)
         {
@@ -289,7 +297,13 @@ void WebServer::dealwithread(int sockfd)
         {
             LOG_INFO("deal with the client(%s)", inet_ntoa(users[sockfd].get_address()->sin_addr));
 
-            m_pool->append_p(users + sockfd);
+            if (!m_pool->append_p(users + sockfd))
+            {
+                LOG_ERROR("thread pool queue full on read, rejecting fd %d", sockfd);
+                users[sockfd].reject_overload();
+                deal_timer(timer, sockfd);
+                return;
+            }
 
             if (timer)
             {
@@ -314,7 +328,12 @@ void WebServer::dealwithwrite(int sockfd)
             adjust_timer(timer);
         }
 
-        m_pool->append(users + sockfd, 1);
+        if (!m_pool->append(users + sockfd, 1))
+        {
+            LOG_ERROR("thread pool queue full on write, closing fd %d", sockfd);
+            deal_timer(timer, sockfd);
+            return;
+        }
 
         while (true)
         {

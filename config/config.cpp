@@ -7,6 +7,7 @@ Config::Config()
       log_enabled(true), log_async(false), log_path("./ServerLog"),
       mysql_host("localhost"), mysql_port(3306), mysql_user("shorturl"),
       mysql_password("shorturl"), mysql_database("shorturl"), mysql_pool_size(8),
+      mysql_acquire_timeout_ms(50),
       redis_enabled(true), redis_uri("tcp://127.0.0.1:6379"),
       redis_connect_timeout_ms(200), redis_socket_timeout_ms(200),
       cache_ttl_seconds(3600), cache_ttl_jitter_seconds(300),
@@ -53,6 +54,9 @@ bool Config::load(const std::string& path)
             if (m["password"])  mysql_password = m["password"].as<std::string>();
             if (m["database"])  mysql_database = m["database"].as<std::string>();
             if (m["pool_size"]) mysql_pool_size = m["pool_size"].as<int>();
+            if (m["acquire_timeout_ms"]) {
+                mysql_acquire_timeout_ms = m["acquire_timeout_ms"].as<int>();
+            }
         }
 
         if (cfg["redis"]) {

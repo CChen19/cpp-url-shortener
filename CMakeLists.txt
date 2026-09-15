@@ -69,3 +69,18 @@ target_link_libraries(server
     mysqlclient
     yaml-cpp
 )
+
+enable_testing()
+
+add_executable(test_mysql_pool_timeout
+    tests/test_mysql_pool_timeout.cpp
+    CGImysql/sql_connection_pool.cpp
+    log/log.cpp
+)
+
+target_link_libraries(test_mysql_pool_timeout
+    Threads::Threads
+    mysqlclient
+)
+
+add_test(NAME mysql_pool_timeout COMMAND test_mysql_pool_timeout)
