@@ -137,7 +137,7 @@ follow `302`. webbench `pages/min` is not QPS.
 ./test_pressure/run_scenarios.sh --rate 200 --duration 15s
 ```
 
-Filled runs on this repo’s Windows gaming laptop (WSL2, Ryzen 7 5800H) are in
+Filled runs on a Windows gaming laptop (WSL2) are in
 [docs/laptop_wsl2_experiment.md](docs/laptop_wsl2_experiment.md) and
 [docs/phase0_baseline.md](docs/phase0_baseline.md). Not a server rating.
 

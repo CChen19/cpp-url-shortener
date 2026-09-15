@@ -13,7 +13,7 @@ Canonical assumptions: [business_assumptions.md](business_assumptions.md).
 
 | Knob | Recorded value | Notes |
 |------|----------------|-------|
-| Host / CPU model / cores | Legion R9000P 2021H, Ryzen 7 5800H, 8c/16t, 11 GiB WSL2 | **Laptop stand-in, not a server** |
+| Host / CPU model / cores | Windows gaming laptop, 8c/16t, 11 GiB WSL2 | **Laptop stand-in, not a server** |
 | OS / kernel | Ubuntu 20.04.3 LTS / `6.18.33.2-microsoft-standard-WSL2` | |
 | Compiler / build type | g++ 9.4.0, Release | **Do not** treat ASan/TSan/UBSan builds as perf |
 | Binary path / git SHA | `./build-linux/server`; Pass 1 = `7865706` + Release `addsig`; Pass 2 also Kafka worker `poll` | See laptop experiment |
@@ -59,7 +59,7 @@ Outputs land under `test_pressure/results/<timestamp>/` (gitignored).
 ### Host metrics during a run
 
 ```bash
-./test_pressure/drivers/host_metrics.sh --pid "$(pgrep -n -f './build-linux/server')" --interval 1 --out /tmp/host_metrics.csv
+./test_pressure/drivers/host_metrics.sh --pid "$(pgrep -n -f './build-linux/server')" --interval 1 --out test_pressure/results/host_metrics.csv
 ```
 
 Captures CPU%, RSS, and voluntary/involuntary context switches from `/proc`.

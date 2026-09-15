@@ -17,11 +17,11 @@ status classes, with the machine labeled.
 
 | Knob | Recorded value |
 |------|----------------|
-| Host | Lenovo Legion R9000P 2021H (hostname `R9000P-2021H`) |
-| CPU | AMD Ryzen 7 5800H, 8 cores / 16 threads (WSL2 sees 16) |
+| Host | Windows gaming laptop (WSL2); no hostname recorded |
+| CPU | 8 cores / 16 threads (WSL2 reports 16) |
 | Memory (WSL2) | 11 GiB |
 | OS | WSL2, Ubuntu 20.04.3 LTS, kernel `6.18.33.2-microsoft-standard-WSL2` |
-| Compiler / build | g++ 9.4.0, `CMAKE_BUILD_TYPE=Release`, `/usr/bin/g++` |
+| Compiler / build | g++ 9.4.0, `CMAKE_BUILD_TYPE=Release` |
 | Git | Pass 1: `7865706` + Release `Utils::addsig`. Pass 2: also Kafka worker `poll` |
 | Binary | `./build-linux/server` |
 | Config | `config/config.yaml`: port 9006, `thread_num=8`, `actor_model=0` |
@@ -54,9 +54,7 @@ the same SHA would have installed the handler; tests do not start
 ./test_pressure/run_scenarios.sh --scenario hot --rate 500 --duration 15s --skip-seed
 ```
 
-JSON lands under `test_pressure/results/<timestamp>/` (gitignored). This machine
-also kept a copy under a local `/tmp/...` directory; that path is not part of
-the repo.
+JSON lands under `test_pressure/results/<timestamp>/` (gitignored).
 
 ## Results — 200 req/s × 15s
 
@@ -100,9 +98,8 @@ That matches “redirect outranks stats; drops/failures must be visible.”
 
 ## Host metrics
 
-`host_metrics.sh` was pointed at pid `137598`. Samples were ~0% CPU and a
-flat 11 MiB RSS with almost no context switches — not credible next to this
-load. Likely a pid mismatch (wrapper vs server) or WSL `/proc` accounting.
+`host_metrics.sh` samples were ~0% CPU and a flat ~11 MiB RSS — not credible
+next to this load. Likely a pid mismatch or WSL `/proc` accounting.
 **CPU% / RSS are omitted from the tables.**
 
 ## What the first run did not show

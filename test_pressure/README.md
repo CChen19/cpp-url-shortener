@@ -42,7 +42,7 @@ Overlays: `overlays/bench_redis_disabled.yaml`, `overlays/bench_kafka_disabled.y
 ## Host metrics
 
 ```bash
-./test_pressure/drivers/host_metrics.sh --pid <server_pid> --interval 1 --duration 30 --out /tmp/host.csv
+./test_pressure/drivers/host_metrics.sh --pid <server_pid> --interval 1 --duration 30 --out test_pressure/results/host.csv
 ```
 
 ## Secondary tools (optional)
