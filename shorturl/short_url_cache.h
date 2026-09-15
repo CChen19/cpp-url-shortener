@@ -153,16 +153,21 @@ public:
     bool enabled() const;
     bool redis_available() const;
 
-private:
-    ShortUrlCache();
-
-    int ttl_with_jitter();
-    std::string cache_key(const std::string& code) const;
+    // Redis wire format. Undecodable payloads are not Hits (no expire_at → Miss/refill).
     static std::string encode_redis_value(const std::string& long_url,
                                           const std::string& expire_at);
     static bool decode_redis_value(const std::string& raw,
                                    std::string* long_url,
                                    std::string* expire_at);
+    // Classify a Redis GET payload without I/O. Plain/legacy/garbage → Miss.
+    static CacheStatus interpret_redis_payload(const std::string& raw,
+                                               LookupValue* value);
+
+private:
+    ShortUrlCache();
+
+    int ttl_with_jitter();
+    std::string cache_key(const std::string& code) const;
 
     bool enabled_;
     bool redis_available_;

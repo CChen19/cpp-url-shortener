@@ -67,8 +67,11 @@ void LocalUrlCache::configure(size_t shard_count,
                               int positive_ttl_jitter_seconds,
                               int negative_ttl_seconds) {
     shard_count_ = std::max<size_t>(1, shard_count);
-    positive_byte_budget_ = std::max<size_t>(1024, positive_byte_budget);
-    negative_byte_budget_ = std::max<size_t>(1024, negative_byte_budget);
+    // Configured budgets are process-wide; split evenly across shards.
+    positive_byte_budget_ =
+        std::max<size_t>(1024, positive_byte_budget / shard_count_);
+    negative_byte_budget_ =
+        std::max<size_t>(1024, negative_byte_budget / shard_count_);
     positive_ttl_seconds_ = std::max(1, positive_ttl_seconds);
     positive_ttl_jitter_seconds_ = std::max(0, positive_ttl_jitter_seconds);
     negative_ttl_seconds_ = std::max(1, negative_ttl_seconds);
@@ -431,31 +434,20 @@ ShortUrlCache::get_redis(const std::string& code, LookupValue* value,
             return CacheStatus::Miss;
         }
 
-        std::string long_url;
-        std::string expire_at;
-        if (!decode_redis_value(*raw, &long_url, &expire_at)) {
-            // Legacy plain-URL values: treat as never-expiring.
-            long_url = *raw;
-            expire_at.clear();
+        const CacheStatus decoded = interpret_redis_payload(*raw, value);
+        if (decoded == CacheStatus::Miss) {
+            // Undecodable / legacy plain URL: cannot carry expire_at → refill MySQL.
+            MetricsRegistry::instance().observe_cache_result("redis_undecodable");
+            return CacheStatus::Miss;
         }
-
-        if (LocalUrlCache::is_business_expired(expire_at)) {
+        if (decoded == CacheStatus::Expired) {
             try {
                 redis_->del(cache_key(code));
             } catch (const sw::redis::Error&) {
                 // Best-effort drop of expired mapping.
             }
-            if (value) {
-                value->long_url = long_url;
-                value->expire_at = expire_at;
-            }
             MetricsRegistry::instance().observe_cache_result("redis_expired");
             return CacheStatus::Expired;
-        }
-
-        if (value) {
-            value->long_url = long_url;
-            value->expire_at = expire_at;
         }
         MetricsRegistry::instance().observe_cache_result("redis_hit");
         return CacheStatus::Hit;
@@ -616,4 +608,27 @@ bool ShortUrlCache::decode_redis_value(const std::string& raw,
         *long_url = raw.substr(second + 1);
     }
     return true;
+}
+
+ShortUrlCache::CacheStatus
+ShortUrlCache::interpret_redis_payload(const std::string& raw,
+                                       LookupValue* value) {
+    std::string long_url;
+    std::string expire_at;
+    if (!decode_redis_value(raw, &long_url, &expire_at)) {
+        // Phase-1 plain URLs / garbage cannot carry business expiry → Miss → MySQL.
+        return CacheStatus::Miss;
+    }
+    if (LocalUrlCache::is_business_expired(expire_at)) {
+        if (value) {
+            value->long_url = long_url;
+            value->expire_at = expire_at;
+        }
+        return CacheStatus::Expired;
+    }
+    if (value) {
+        value->long_url = long_url;
+        value->expire_at = expire_at;
+    }
+    return CacheStatus::Hit;
 }

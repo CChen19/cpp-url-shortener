@@ -197,6 +197,52 @@ void test_is_business_expired_helper() {
                 "future expire_at is not expired");
 }
 
+void test_legacy_redis_payload_is_miss_not_never_expire_hit() {
+    // Old bug: plain URL → Hit with empty expire_at → put_local_positive(..., "")
+    // → L1 302 until cache TTL even when MySQL expire_at is past.
+    ShortUrlCache::LookupValue value;
+    value.long_url = "should-not-matter";
+    value.expire_at = "should-not-matter";
+
+    const ShortUrlCache::CacheStatus plain =
+        ShortUrlCache::interpret_redis_payload("https://example.com/legacy", &value);
+    expect_true(plain == ShortUrlCache::CacheStatus::Miss,
+                "plain Redis URL is Miss (refill MySQL), not Hit");
+    expect_true(!ShortUrlCache::decode_redis_value("https://example.com/legacy",
+                                                   nullptr, nullptr),
+                "plain URL fails v1 decode");
+
+    const ShortUrlCache::CacheStatus garbage =
+        ShortUrlCache::interpret_redis_payload("v1-no-newlines", &value);
+    expect_true(garbage == ShortUrlCache::CacheStatus::Miss,
+                "undecodable Redis payload is Miss");
+
+    const ShortUrlCache::CacheStatus truncated =
+        ShortUrlCache::interpret_redis_payload("v1\nonly-expire", &value);
+    expect_true(truncated == ShortUrlCache::CacheStatus::Miss,
+                "truncated v1 payload is Miss");
+
+    // Valid v1 never-expire remains Hit; must not regress that path.
+    const std::string encoded =
+        ShortUrlCache::encode_redis_value("https://example.com/ok", "");
+    ShortUrlCache::LookupValue hit_val;
+    const ShortUrlCache::CacheStatus hit =
+        ShortUrlCache::interpret_redis_payload(encoded, &hit_val);
+    expect_true(hit == ShortUrlCache::CacheStatus::Hit, "encoded v1 empty expire is Hit");
+    expect_true(hit_val.long_url == "https://example.com/ok", "v1 hit returns url");
+    expect_true(hit_val.expire_at.empty(), "v1 empty expire_at means never");
+
+    // Encoded past expire_at stays Expired (410), never Hit.
+    const std::string expired_raw =
+        ShortUrlCache::encode_redis_value("https://example.com/old",
+                                          "2000-01-01 00:00:00");
+    ShortUrlCache::LookupValue exp_val;
+    const ShortUrlCache::CacheStatus expired =
+        ShortUrlCache::interpret_redis_payload(expired_raw, &exp_val);
+    expect_true(expired == ShortUrlCache::CacheStatus::Expired,
+                "encoded v1 past expire_at is Expired not Hit");
+}
+
 } // namespace
 
 int main() {
@@ -208,6 +254,7 @@ int main() {
     test_singleflight_overflow_503();
     test_bloom_default_not_hard_404();
     test_is_business_expired_helper();
+    test_legacy_redis_payload_is_miss_not_never_expire_hit();
 
     if (g_failures != 0) {
         std::fprintf(stderr, "%d failure(s)\n", g_failures);

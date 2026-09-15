@@ -107,7 +107,7 @@ Redis value encoding:
 shorturl:{code} -> "v1\n{expire_at}\n{long_url}"
 ```
 
-Legacy plain-URL values are still readable and treated as never-expiring.
+Legacy plain-URL / undecodable Redis values are treated as a **Miss** (fall through to MySQL for `expire_at`), then `set()` rewrites `v1\n{expire_at}\n{long_url}`. They must not be promoted into L1 as never-expiring Hits.
 
 ## 三防
 
