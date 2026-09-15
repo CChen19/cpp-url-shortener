@@ -49,6 +49,16 @@ bool set_safe_location(HttpResponse& resp, const std::string& long_url) {
     return true;
 }
 
+void respond_expired(HttpResponse& resp) {
+    resp.set_status(410);
+    resp.set_json({{"error", "short url expired"}});
+}
+
+void respond_not_found(HttpResponse& resp) {
+    resp.set_status(404);
+    resp.set_json({{"error", "short url not found"}});
+}
+
 void shorten(const HttpRequest& req, HttpResponse& resp) {
     nlohmann::json payload;
     try {
@@ -111,11 +121,8 @@ void shorten(const HttpRequest& req, HttpResponse& resp) {
 
         ShortUrlRepository::CreateStatus status = repo.create(record, &db_error);
         if (status == ShortUrlRepository::CreateStatus::Ok) {
-            if (expire_at.empty()) {
-                ShortUrlCache::instance().set(record.short_code, long_url);
-            } else {
-                ShortUrlCache::instance().add_legal_code(record.short_code);
-            }
+            // Always write L1 (+ Redis if up) with expire_at. Cache TTL ≠ business expiry.
+            ShortUrlCache::instance().set(record.short_code, long_url, expire_at);
 
             resp.set_status(201);
             nlohmann::json body = {
@@ -136,81 +143,133 @@ void shorten(const HttpRequest& req, HttpResponse& resp) {
     resp.set_json({{"error", "short url storage unavailable"}, {"detail", db_error}});
 }
 
+SingleFlightResult origin_lookup(ShortUrlCache& cache, const std::string& code) {
+    SingleFlightResult out;
+
+    ShortUrlCache::LookupValue cached;
+    ShortUrlCache::CacheStatus redis_status =
+        cache.get_redis(code, &cached);
+    if (redis_status == ShortUrlCache::CacheStatus::Hit) {
+        cache.put_local_positive(code, cached.long_url, cached.expire_at);
+        out.kind = SingleFlightResult::Kind::Hit;
+        out.long_url = cached.long_url;
+        out.expire_at = cached.expire_at;
+        return out;
+    }
+    if (redis_status == ShortUrlCache::CacheStatus::Expired) {
+        cache.erase_local(code);
+        out.kind = SingleFlightResult::Kind::Expired;
+        out.long_url = cached.long_url;
+        out.expire_at = cached.expire_at;
+        return out;
+    }
+
+    // Redis miss/unavailable: refill from MySQL. Do not hold Redis mutex here.
+    MYSQL* mysql = nullptr;
+    connectionRAII mysqlcon(&mysql, connection_pool::GetInstance());
+    if (!mysql) {
+        out.kind = SingleFlightResult::Kind::Error;
+        out.error = "mysql connection unavailable";
+        return out;
+    }
+
+    ShortUrlRepository repo(mysql);
+    std::string db_error;
+    std::string long_url;
+    std::string expire_at;
+    ShortUrlRepository::FindStatus status =
+        repo.find_long_url(code, &long_url, &db_error, &expire_at);
+
+    if (status == ShortUrlRepository::FindStatus::Ok) {
+        cache.set(code, long_url, expire_at);
+        out.kind = SingleFlightResult::Kind::Hit;
+        out.long_url = long_url;
+        out.expire_at = expire_at;
+        return out;
+    }
+    if (status == ShortUrlRepository::FindStatus::Expired) {
+        cache.erase(code);
+        out.kind = SingleFlightResult::Kind::Expired;
+        out.long_url = long_url;
+        out.expire_at = expire_at;
+        return out;
+    }
+    if (status == ShortUrlRepository::FindStatus::NotFound) {
+        cache.put_local_negative(code);
+        out.kind = SingleFlightResult::Kind::NotFound;
+        return out;
+    }
+
+    out.kind = SingleFlightResult::Kind::Error;
+    out.error = db_error;
+    return out;
+}
+
 void redirect(const HttpRequest& req, HttpResponse& resp) {
     auto it = req.params.find("code");
     if (it == req.params.end() || it->second.empty()) {
-        resp.set_status(404);
-        resp.set_json({{"error", "not found"}});
+        respond_not_found(resp);
         return;
     }
 
     const std::string code = it->second;
     ShortUrlCache& cache = ShortUrlCache::instance();
-    std::string long_url;
-    std::string cache_error;
 
-    ShortUrlCache::CacheStatus cache_status =
-        cache.get(code, &long_url, &cache_error);
-    if (cache_status == ShortUrlCache::CacheStatus::Hit) {
+    // Bloom is a hint by default. Hard 404 only when bloom_hard_filter is on.
+    if (cache.bloom_hard_filter() && cache.bloom_ready() &&
+        !cache.bloom_might_contain(code)) {
+        respond_not_found(resp);
+        return;
+    }
+
+    ShortUrlCache::LookupValue local_value;
+    ShortUrlCache::CacheStatus local_status = cache.get_local(code, &local_value);
+    if (local_status == ShortUrlCache::CacheStatus::Hit) {
         ClickEventProducer::instance().publish_click(req, code);
-        set_safe_location(resp, long_url);
+        set_safe_location(resp, local_value.long_url);
         return;
     }
-    if (cache_status == ShortUrlCache::CacheStatus::Filtered) {
-        resp.set_status(404);
-        resp.set_json({{"error", "short url not found"}});
+    if (local_status == ShortUrlCache::CacheStatus::Expired) {
+        // Business expiry on L1: never 302. Drop positive; do not negative-cache
+        // as NotFound (that would flip 410 → 404).
+        cache.erase(code);
+        respond_expired(resp);
+        return;
+    }
+    if (local_status == ShortUrlCache::CacheStatus::NotFound) {
+        respond_not_found(resp);
         return;
     }
 
-    std::shared_ptr<std::mutex> rebuild_lock = cache.rebuild_mutex(code);
-    std::lock_guard<std::mutex> guard(*rebuild_lock);
+    // Miss: one shared origin lookup (Redis → MySQL). Waiters share the result.
+    // Waiters sit on condvar only; MySQL is acquired inside the loader, not while waiting.
+    SingleFlightResult flight = cache.singleflight().do_flight(
+        code, [&]() { return origin_lookup(cache, code); });
 
-    cache_status = cache.get(code, &long_url, &cache_error);
-    if (cache_status == ShortUrlCache::CacheStatus::Hit) {
+    if (flight.kind == SingleFlightResult::Kind::Hit) {
         ClickEventProducer::instance().publish_click(req, code);
-        set_safe_location(resp, long_url);
+        set_safe_location(resp, flight.long_url);
         return;
     }
-
-    MYSQL* mysql = nullptr;
-    connectionRAII mysqlcon(&mysql, connection_pool::GetInstance());
-    if (!mysql) {
+    if (flight.kind == SingleFlightResult::Kind::Expired) {
+        respond_expired(resp);
+        return;
+    }
+    if (flight.kind == SingleFlightResult::Kind::NotFound) {
+        respond_not_found(resp);
+        return;
+    }
+    if (flight.kind == SingleFlightResult::Kind::Overload) {
         resp.set_status(503);
         resp.set_json({{"error", "short url storage unavailable"},
-                       {"detail", "mysql connection unavailable"}});
-        return;
-    }
-
-    ShortUrlRepository repo(mysql);
-    std::string db_error;
-    bool cacheable = false;
-    ShortUrlRepository::FindStatus status =
-        repo.find_long_url(code, &long_url, &db_error, &cacheable);
-
-    if (status == ShortUrlRepository::FindStatus::Ok) {
-        if (cacheable) {
-            cache.set(code, long_url);
-        } else {
-            cache.add_legal_code(code);
-        }
-        ClickEventProducer::instance().publish_click(req, code);
-        set_safe_location(resp, long_url);
-        return;
-    }
-    if (status == ShortUrlRepository::FindStatus::Expired) {
-        cache.erase(code);
-        resp.set_status(410);
-        resp.set_json({{"error", "short url expired"}});
-        return;
-    }
-    if (status == ShortUrlRepository::FindStatus::NotFound) {
-        resp.set_status(404);
-        resp.set_json({{"error", "short url not found"}});
+                       {"detail", flight.error.empty() ? "singleflight overload"
+                                                       : flight.error}});
         return;
     }
 
     resp.set_status(503);
-    resp.set_json({{"error", "short url storage unavailable"}, {"detail", db_error}});
+    resp.set_json({{"error", "short url storage unavailable"},
+                   {"detail", flight.error}});
 }
 
 } // namespace

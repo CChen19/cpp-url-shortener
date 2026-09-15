@@ -31,9 +31,10 @@ public:
     explicit ShortUrlRepository(MYSQL* mysql);
 
     CreateStatus create(const ShortUrlRecord& record, std::string* error = nullptr);
+    // On Ok/Expired, expire_at is set (empty = never). long_url set on Ok/Expired.
     FindStatus find_long_url(const std::string& code, std::string* long_url,
                              std::string* error = nullptr,
-                             bool* cacheable = nullptr);
+                             std::string* expire_at = nullptr);
     bool list_active_codes(std::vector<std::string>* codes, std::string* error = nullptr);
 
 private:

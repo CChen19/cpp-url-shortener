@@ -41,14 +41,20 @@ cache:
   ttl_jitter_seconds: 300
   bloom_bits: 1048576
   bloom_hashes: 7
+  bloom_hard_filter: false
+  local_shards: 16
+  local_positive_bytes: 67108864
+  local_negative_bytes: 4194304
+  local_negative_ttl_seconds: 30
+  singleflight_max_inflight: 1024
+  singleflight_max_waiters_per_key: 256
 ```
 
-Redis key：
+Redis key:
 
 ```text
-shorturl:{code} -> long_url
+shorturl:{code} -> v1\n{expire_at}\n{long_url}
 ```
-
 ## MySQL 连接约定
 
 项目使用专用应用用户：
@@ -78,67 +84,64 @@ mysql -h127.0.0.1 -ushorturl -pshorturl shorturl -e "SHOW TABLES;"
 
 ### 读路径：GET /{code}
 
-1. Bloom Filter 判断 `code` 是否可能存在。
-2. BF 判定不存在：直接返回 404，拦截缓存穿透。
-3. BF 判定可能存在：读 Redis。
-4. Redis 命中：返回 302。
-5. Redis miss：获取该 `code` 对应的 singleflight mutex。
-6. 加锁后 double-check Redis，避免等待期间其他线程已重建。
-7. 仍 miss：查询 MySQL。
-8. MySQL 命中且无 `expire_at`：写 Redis，TTL 加随机抖动，然后返回 302。
-9. MySQL 命中但有 `expire_at`：只补充 Bloom Filter，不写 Redis，避免业务过期后缓存继续 302。
-10. MySQL 已过期：删除 Redis，返回 410。
-11. MySQL 不存在：返回 404。
+1. Optional Bloom hard-filter (default **off**): only if `bloom_hard_filter: true` and bloom is ready and miss → 404. Soft/default: bloom miss is a hint; continue.
+2. L1 local cache (sharded, byte-budgeted): values carry `long_url` + business `expire_at` + cache-expire time.
+3. L1 Hit and not business-expired → 302 (no Redis/MySQL).
+4. L1 Hit but past `expire_at` → **410**, drop entry. Never 302. Cache TTL expiry → Miss (refill), not 410.
+5. L1 negative hit → 404.
+6. L1 Miss → singleflight: one shared origin lookup per code (waiters share Hit / NotFound / Expired / Error). Overflow → 503.
+7. Origin: Redis L2 (value encodes `expire_at`) → on miss/unavailable, MySQL.
+8. Redis/MySQL Hit: populate L1 (+ Redis if up) with `expire_at`, return 302.
+9. Business-expired at Redis/MySQL → erase caches, return **410** (never 302).
+10. MySQL NotFound → short negative L1, return 404.
 
 ### 写路径：POST /api/shorten
 
-1. 生成 Snowflake ID。
-2. Base62 得到 `short_code`。
-3. 写 MySQL。
-4. DB 成功后把 `short_code` 加入 Bloom Filter。
-5. 如果短链无 `expire_at`，尝试写入 Redis：`SETEX shorturl:{code} ttl+jitter long_url`。
-6. 如果短链有 `expire_at`，只写 Bloom Filter，不写 Redis，优先保证过期语义正确。
+1. Generate Snowflake ID → Base62 `short_code`.
+2. Write MySQL.
+3. On success: always write L1 and (if Redis up) Redis with **url + expire_at** (empty expire_at = never). Cache TTL ≠ business expiry.
 
-短链创建后几乎 immutable，所以永久短链创建成功后预热缓存是可以接受的；即使 Redis 写失败，也不影响主路径，后续读请求会回源 MySQL 并重建缓存。
+Redis value encoding:
+
+```text
+shorturl:{code} -> "v1\n{expire_at}\n{long_url}"
+```
+
+Legacy plain-URL values are still readable and treated as never-expiring.
 
 ## 三防
 
-### 穿透：Bloom Filter
+### 穿透：Bloom Filter（默认软）
 
-短链 `code` 集合天然适合 BF：
+Bloom warmup may still populate from unexpired codes. It is **not** the final authority.
 
-- 合法 code 集合相对固定。
-- code 创建后基本不删除。
-- BF 有假阳性但无假阴性，适合在 DB 前做快速拦截。
+- Default `bloom_hard_filter: false`: bloom miss does not hard-404; unknown-to-bloom codes still reach L1/Redis/MySQL.
+- Opt-in `bloom_hard_filter: true` is **single-process-only**. Integrity is not guaranteed if another writer exists. Also: codes that were unexpired at warmup and later expire can 404 vs 410 until restart.
 
-启动时从 MySQL 预热所有未过期 code：
+Negative L1 (short TTL, separate byte budget) limits random-code pressure on hot positives.
 
-```sql
-SELECT short_code FROM short_url
-WHERE expire_at IS NULL OR expire_at > NOW();
-```
-
-新短链创建成功后实时 `BF.add(code)`。如果 BF 未预热成功，为了可用性，系统仍然可以走 DB-only 路径；但穿透防护效果会下降。
-
-### 击穿：Singleflight
-
-热点 code 过期或 Redis miss 时，多个线程可能同时回源 DB。当前实现按 code 获取互斥锁：
+### 击穿：Singleflight（共享结果）
 
 ```text
 singleflight key = short_code
 ```
 
-同一个 code 同一时间只允许一个线程重建缓存。其他线程等待锁，拿到锁后先 double-check Redis，命中则直接返回。
+One in-flight origin loader per key. Waiters block on a condvar and **share** the loader result (including Redis-down DB path). Bounds: `singleflight_max_inflight` / `singleflight_max_waiters_per_key` → 503 on overflow. Waiters do not hold a MySQL connection while waiting.
 
 ### 雪崩：TTL 随机抖动
 
-Redis 写入时使用：
+Redis / L1 positive writes use:
 
 ```text
 ttl = ttl_seconds + random(0, ttl_jitter_seconds)
 ```
 
-这样批量写入或集中预热的 key 不会在同一秒集中过期，降低大面积回源 MySQL 的风险。
+### 业务过期 vs 缓存 TTL
+
+- Cache TTL controls how long a value may stay in L1/Redis.
+- `expire_at` controls whether the mapping is still valid.
+- A still-cached but business-expired mapping must return **410**, never a stale **302**.
+- A cache miss means refill from authoritative storage, not "not found".
 
 ## 一致性策略
 

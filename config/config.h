@@ -40,6 +40,15 @@ public:
     int cache_ttl_jitter_seconds;
     int bloom_bits;
     int bloom_hashes;
+    // When true, bloom miss is a hard 404. Default false: bloom is a hint only.
+    // Opt-in true is single-process-only; expired codes loaded at warmup can 404 vs 410.
+    bool bloom_hard_filter;
+    int local_cache_shards;
+    int local_positive_bytes;
+    int local_negative_bytes;
+    int local_negative_ttl_seconds;
+    int singleflight_max_inflight;
+    int singleflight_max_waiters_per_key;
 
     bool kafka_enabled;
     std::string kafka_brokers;

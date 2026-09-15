@@ -51,7 +51,7 @@ ShortUrlRepository::create(const ShortUrlRecord& record, std::string* error) {
 
 ShortUrlRepository::FindStatus
 ShortUrlRepository::find_long_url(const std::string& code, std::string* long_url,
-                                  std::string* error, bool* cacheable) {
+                                  std::string* error, std::string* expire_at) {
     if (!mysql_) {
         if (error) *error = "mysql connection unavailable";
         return FindStatus::DbError;
@@ -59,8 +59,8 @@ ShortUrlRepository::find_long_url(const std::string& code, std::string* long_url
 
     std::string sql =
         "SELECT long_url, "
-        "IF(expire_at IS NOT NULL AND expire_at <= NOW(), 1, 0) AS expired, "
-        "IF(expire_at IS NULL, 1, 0) AS cacheable "
+        "IF(expire_at IS NULL, '', DATE_FORMAT(expire_at, '%Y-%m-%d %H:%i:%s')), "
+        "IF(expire_at IS NOT NULL AND expire_at <= NOW(), 1, 0) AS expired "
         "FROM ";
     sql += short_url_table_for_code(code);
     sql += " WHERE short_code = ";
@@ -84,17 +84,22 @@ ShortUrlRepository::find_long_url(const std::string& code, std::string* long_url
         return FindStatus::NotFound;
     }
 
-    if (row[1] && std::string(row[1]) == "1") {
+    const std::string url = row[0] ? row[0] : "";
+    const std::string exp = row[1] ? row[1] : "";
+    const bool expired = row[2] && std::string(row[2]) == "1";
+
+    if (long_url) {
+        *long_url = url;
+    }
+    if (expire_at) {
+        *expire_at = exp;
+    }
+
+    if (expired) {
         mysql_free_result(result);
         return FindStatus::Expired;
     }
 
-    if (long_url) {
-        *long_url = row[0] ? row[0] : "";
-    }
-    if (cacheable) {
-        *cacheable = row[2] && std::string(row[2]) == "1";
-    }
     mysql_free_result(result);
     return FindStatus::Ok;
 }

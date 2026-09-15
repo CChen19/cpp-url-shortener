@@ -12,7 +12,13 @@ Config::Config()
       redis_enabled(true), redis_uri("tcp://127.0.0.1:6379"),
       redis_connect_timeout_ms(200), redis_socket_timeout_ms(200),
       cache_ttl_seconds(3600), cache_ttl_jitter_seconds(300),
-      bloom_bits(1048576), bloom_hashes(7),
+      bloom_bits(1048576), bloom_hashes(7), bloom_hard_filter(false),
+      local_cache_shards(16),
+      local_positive_bytes(64 * 1024 * 1024),
+      local_negative_bytes(4 * 1024 * 1024),
+      local_negative_ttl_seconds(30),
+      singleflight_max_inflight(1024),
+      singleflight_max_waiters_per_key(256),
       kafka_enabled(true), kafka_brokers("127.0.0.1:9092"),
       kafka_click_topic("shorturl.clicks"), kafka_message_timeout_ms(3000),
       kafka_linger_ms(5), kafka_retries(3),
@@ -77,6 +83,24 @@ bool Config::load(const std::string& path)
             if (c["ttl_jitter_seconds"]) cache_ttl_jitter_seconds = c["ttl_jitter_seconds"].as<int>();
             if (c["bloom_bits"])         bloom_bits               = c["bloom_bits"].as<int>();
             if (c["bloom_hashes"])       bloom_hashes             = c["bloom_hashes"].as<int>();
+            if (c["bloom_hard_filter"])  bloom_hard_filter        = c["bloom_hard_filter"].as<bool>();
+            if (c["local_shards"])       local_cache_shards       = c["local_shards"].as<int>();
+            if (c["local_positive_bytes"]) {
+                local_positive_bytes = c["local_positive_bytes"].as<int>();
+            }
+            if (c["local_negative_bytes"]) {
+                local_negative_bytes = c["local_negative_bytes"].as<int>();
+            }
+            if (c["local_negative_ttl_seconds"]) {
+                local_negative_ttl_seconds = c["local_negative_ttl_seconds"].as<int>();
+            }
+            if (c["singleflight_max_inflight"]) {
+                singleflight_max_inflight = c["singleflight_max_inflight"].as<int>();
+            }
+            if (c["singleflight_max_waiters_per_key"]) {
+                singleflight_max_waiters_per_key =
+                    c["singleflight_max_waiters_per_key"].as<int>();
+            }
         }
 
         if (cfg["kafka"]) {

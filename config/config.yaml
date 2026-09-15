@@ -34,6 +34,16 @@ cache:
   ttl_jitter_seconds: 300
   bloom_bits: 1048576
   bloom_hashes: 7
+  # Default false: bloom miss is a hint, not a hard 404. Opt-in true is
+  # single-process-only; warmup of unexpired codes can make later-expired
+  # codes 404 instead of 410 until the process restarts.
+  bloom_hard_filter: false
+  local_shards: 16
+  local_positive_bytes: 67108864   # 64 MiB; URL + metadata budget
+  local_negative_bytes: 4194304    # 4 MiB; separate so random codes cannot flush hot positives
+  local_negative_ttl_seconds: 30
+  singleflight_max_inflight: 1024
+  singleflight_max_waiters_per_key: 256
 
 kafka:
   enabled: true
