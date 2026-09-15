@@ -170,3 +170,17 @@ if (RDKAFKA_INCLUDE_DIR AND RDKAFKA_LIBRARY)
 endif()
 
 add_test(NAME phase3_isolate COMMAND test_phase3_isolate)
+
+add_executable(test_metrics_shards
+    tests/test_metrics_shards.cpp
+    observability/metrics_registry.cpp
+)
+target_link_libraries(test_metrics_shards Threads::Threads)
+add_test(NAME metrics_shards COMMAND test_metrics_shards)
+
+# In-process observe contention microbench (not a ctest; run manually for evidence).
+add_executable(bench_metrics_observe
+    tests/bench_metrics_observe.cpp
+    observability/metrics_registry.cpp
+)
+target_link_libraries(bench_metrics_observe Threads::Threads)
