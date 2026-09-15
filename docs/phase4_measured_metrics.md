@@ -2,10 +2,12 @@
 
 ## Bottleneck (measured)
 
-Live Phase 0 harness could not run: `curl http://127.0.0.1:9006/health` →
-`Failed to connect ... Connection refused`. Command:
-`bash test_pressure/run_scenarios.sh --dry-run --scenario hot --duration 2s`
-recorded `server_up=0`. No cluster QPS claimed.
+While this phase landed, the live Phase 0 harness could not run:
+`curl http://127.0.0.1:9006/health` → connection refused
+(`run_scenarios.sh --dry-run` recorded `server_up=0`). No cluster QPS claimed.
+
+A later laptop / WSL2 stand-in run is in
+[laptop_wsl2_experiment.md](laptop_wsl2_experiment.md) (still not a server QPS).
 
 In-process evidence on the pre-change process-wide `mutex_` (Release, g++ -O2):
 

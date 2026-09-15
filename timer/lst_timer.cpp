@@ -195,7 +195,14 @@ void Utils::addsig(int sig, void(handler)(int), bool restart)
     if (restart)
         sa.sa_flags |= SA_RESTART;
     sigfillset(&sa.sa_mask);
-    assert(sigaction(sig, &sa, NULL) != -1);
+    // Release builds define NDEBUG, which deletes assert() *and* its argument.
+    // The original TinyWebServer line was assert(sigaction(...)), so SIGALRM was
+    // never installed and alarm(TIMESLOT) killed the process after 5s.
+    if (sigaction(sig, &sa, NULL) == -1)
+    {
+        perror("sigaction");
+        abort();
+    }
 }
 
 //定时处理任务，重新定时以不断触发SIGALRM信号

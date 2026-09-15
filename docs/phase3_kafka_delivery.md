@@ -21,7 +21,10 @@ Ubuntu 安装：
 sudo apt install -y librdkafka-dev
 ```
 
-本地 Kafka broker 可用 Docker 启动单节点 KRaft：
+本地 Kafka 可用 Docker 起单节点 KRaft，或解包 Apache Kafka 3.7.x 后
+`bin/kafka-server-start.sh config/kraft/server.properties`。游戏本实验时
+Docker 引擎未起来，用的是 3.7.2 解包，见
+[laptop_wsl2_experiment.md](laptop_wsl2_experiment.md)。Docker 示例：
 
 ```bash
 docker run -d --name tinywebserver-kafka -p 9092:9092 \

@@ -199,13 +199,24 @@ void ClickEventProducer::worker_loop() {
         ClickEvent event;
         {
             std::unique_lock<std::mutex> lock(mutex_);
-            cv_.wait(lock, [this]() {
-                return stop_.load() || !queue_.empty();
-            });
+            // Time-bounded wait so the worker can rd_kafka_poll while idle.
+            // librdkafka 1.x needs regular poll to drive produce I/O; poll(0)
+            // only right after producev often expires messages (delivery fail)
+            // even when the broker is up.
+            const bool have_item = cv_.wait_for(
+                lock, std::chrono::milliseconds(50), [this]() {
+                    return stop_.load() || !queue_.empty();
+                });
             if (stop_.load() && queue_.empty()) {
                 break;
             }
-            if (queue_.empty()) {
+            if (!have_item || queue_.empty()) {
+                lock.unlock();
+#ifdef HAVE_RDKAFKA
+                if (producer_) {
+                    rd_kafka_poll(producer_, 50);
+                }
+#endif
                 continue;
             }
             event = std::move(queue_.front());
@@ -245,8 +256,9 @@ void ClickEventProducer::worker_loop() {
         } else {
             MetricsRegistry::instance().observe_kafka_produce_accepted(true);
         }
-        // Poll for delivery reports on the background thread only.
-        rd_kafka_poll(producer_, 0);
+        // Background thread only. A short timeout lets 1.x librdkafka finish
+        // the produce path; request threads still never poll.
+        rd_kafka_poll(producer_, 10);
 #else
         MetricsRegistry::instance().observe_kafka_produce_accepted(false);
 #endif

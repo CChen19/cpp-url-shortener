@@ -23,6 +23,8 @@ Docs: [docs/phase0_baseline.md](../docs/phase0_baseline.md), [docs/business_assu
 
 Results: `test_pressure/results/<timestamp>/` (gitignored).
 
+One filled laptop / WSL2 stand-in (not a server): [docs/laptop_wsl2_experiment.md](../docs/laptop_wsl2_experiment.md).
+
 ## Scenarios
 
 | Name | What |
