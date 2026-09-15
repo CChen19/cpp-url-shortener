@@ -175,13 +175,13 @@ bool ClickEventProducer::publish_click(const HttpRequest& req,
         return false;
     }
 
-    // Bound work on request path: copy fields only. No JSON, produce, or poll.
+    // Bound work on request path: copy fields only. No JSON, produce, poll,
+    // or Snowflake (event_id is minted on the background worker).
     ClickEvent event;
     event.code = code;
     event.user_agent = header_or_empty(req, "User-Agent");
     event.referer = header_or_empty(req, "Referer");
     event.x_forwarded_for = header_or_empty(req, "X-Forwarded-For");
-    event.event_id = next_event_id();
     event.clicked_at_ms = now_ms();
 
     if (!enqueue(std::move(event))) {
@@ -210,6 +210,10 @@ void ClickEventProducer::worker_loop() {
             }
             event = std::move(queue_.front());
             queue_.pop_front();
+        }
+
+        if (event.event_id.empty()) {
+            event.event_id = next_event_id();
         }
 
         if (null_sink_) {

@@ -359,6 +359,10 @@ void ShortUrlCache::init(const Config& config) {
     shutdown();
 
     bool need_probe = false;
+#ifdef HAVE_REDIS_PLUS_PLUS
+    std::shared_ptr<sw::redis::Redis> boot_client;
+#endif
+
     {
         std::lock_guard<std::mutex> guard(mutex_);
 
@@ -412,21 +416,31 @@ void ShortUrlCache::init(const Config& config) {
             pool_opts.wait_timeout = std::chrono::milliseconds(
                 std::max(1, config.redis_socket_timeout_ms));
 
-            // Redis with a pool is thread-safe; request threads must not hold
-            // mutex_ across GET/SET I/O.
+            // Install the client before ping. On ping failure we keep it so the
+            // probe can PING the same handle (do not reset the only client).
             redis_ = std::make_shared<sw::redis::Redis>(options, pool_opts);
-            redis_->ping();
-            redis_available_.store(true);
+            boot_client = redis_;
         } catch (const sw::redis::Error&) {
             redis_.reset();
             redis_available_.store(false);
-            // Probe retries while L1 continues serving hot keys.
+            // Constructor failed: no client to probe. L1 still serves hot keys.
         }
-        need_probe = !redis_available_.load();
 #endif
     }
 
 #ifdef HAVE_REDIS_PLUS_PLUS
+    // Ping outside mutex_ (same rule as request-path Redis I/O).
+    if (boot_client) {
+        try {
+            boot_client->ping();
+            redis_available_.store(true);
+        } catch (const sw::redis::Error&) {
+            // Keep redis_; mark unavailable; probe PING can restore later.
+            redis_available_.store(false);
+            need_probe = true;
+        }
+    }
+
     if (need_probe) {
         ensure_probe_started();
     }
@@ -560,12 +574,10 @@ void ShortUrlCache::probe_loop() {
         {
             std::lock_guard<std::mutex> guard(mutex_);
             redis = redis_;
-            if (!redis && enabled_) {
-                // Client was never created or was cleared; nothing to ping.
-                continue;
-            }
         }
         if (!redis) {
+            // No client (constructor never succeeded). Cannot restore without
+            // recreating from stored options; init ping-fail keeps the client.
             continue;
         }
 
@@ -786,8 +798,31 @@ void ShortUrlCache::mark_redis_unavailable_for_test() {
     redis_available_.store(false);
 }
 
-void ShortUrlCache::simulate_probe_success_for_test() {
+bool ShortUrlCache::has_redis_client_for_test() const {
+#ifdef HAVE_REDIS_PLUS_PLUS
+    std::lock_guard<std::mutex> guard(mutex_);
+    return static_cast<bool>(redis_);
+#else
+    return false;
+#endif
+}
+
+bool ShortUrlCache::probe_restore_if_client_present_for_test() {
+    // Mirrors probe_loop's null-client gate without waiting on the interval.
+#ifdef HAVE_REDIS_PLUS_PLUS
+    std::shared_ptr<sw::redis::Redis> redis;
+    {
+        std::lock_guard<std::mutex> guard(mutex_);
+        redis = redis_;
+    }
+    if (!redis) {
+        return false;
+    }
     restore_redis_available();
+    return true;
+#else
+    return false;
+#endif
 }
 
 void ShortUrlCache::configure_origin_caps_for_test(int redirect_max,

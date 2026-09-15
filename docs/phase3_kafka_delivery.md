@@ -99,15 +99,15 @@ Phase 3：
 
 ```text
 GET /{code}
-  -> Bloom Filter
-  -> Redis
-  -> MySQL fallback
-  -> Redis rebuild
-  -> Kafka produce click event
+  -> Bloom Filter / L1
+  -> Redis / MySQL origin (if miss)
+  -> bounded enqueue click event (drop if full; counted)
   -> 302
+background:
+  -> JSON serialize + Kafka produce/poll + delivery report
 ```
 
-点击统计不在主链路写 MySQL。点击事件进入 Kafka 后，由独立 consumer 异步落库。
+点击统计不在主链路写 MySQL。请求线程只做有界入队；满则丢弃并打点。事件进入 Kafka 后，由独立 consumer 异步落库。
 
 ## 可靠投递三组配置
 

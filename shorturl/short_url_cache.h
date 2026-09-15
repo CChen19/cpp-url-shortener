@@ -189,9 +189,13 @@ public:
     // (handler maps to 503). Separate budgets so create cannot starve redirect.
     OriginBudgetGuard try_acquire_origin(OriginKind kind);
 
-    // Test hooks (no network).
+    // Test hooks.
     void mark_redis_unavailable_for_test();
-    void simulate_probe_success_for_test();
+    // True iff redis_ is non-null (probe can PING). Fails closed if init reset().
+    bool has_redis_client_for_test() const;
+    // Same gate as probe_loop: restore only when a client is held (no network).
+    // Returns false if redis_ is null — old reset-and-skip path fails this.
+    bool probe_restore_if_client_present_for_test();
     void configure_origin_caps_for_test(int redirect_max, int create_max);
 
     // Redis wire format. Undecodable payloads are not Hits (no expire_at → Miss/refill).
