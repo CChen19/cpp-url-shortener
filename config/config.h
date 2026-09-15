@@ -16,6 +16,9 @@ public:
     bool opt_linger;
     int actor_model;
 
+    // Public base used when minting short_url (not derived from Host).
+    std::string public_base_url;
+
     bool log_enabled;
     bool log_async;
     std::string log_path;

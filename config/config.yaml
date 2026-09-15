@@ -5,6 +5,7 @@ server:
   trig_mode: 0          # 0=LT+LT, 1=LT+ET, 2=ET+LT, 3=ET+ET
   opt_linger: false
   actor_model: 0        # 0=main-thread I/O (only supported). 1=reactor is coerced to 0 at startup.
+  public_base_url: "http://localhost:9006"  # minted short_url base; do not trust Host
 
 log:
   enabled: true

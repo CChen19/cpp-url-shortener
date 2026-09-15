@@ -1,4 +1,5 @@
 #include "http_conn.h"
+#include "protocol_utils.h"
 #include "router.h"
 #include "../observability/metrics_registry.h"
 #include "../observability/structured_logger.h"
@@ -122,7 +123,8 @@ void http_conn::init()
     bytes_to_send = 0;
     bytes_have_send = 0;
     m_check_state = CHECK_STATE_REQUESTLINE;
-    m_linger = false;
+    // HTTP/1.1 default is keep-alive unless Connection: close.
+    m_linger = true;
     m_method = GET;
     m_url = 0;
     m_version = 0;
@@ -173,27 +175,27 @@ http_conn::LINE_STATUS http_conn::parse_line()
 
 bool http_conn::read_once()
 {
+    // Buffer full: still return true so process_read can emit 413 (no silent truncate).
     if (m_read_idx >= READ_BUFFER_SIZE)
     {
-        return false;
+        return true;
     }
     int bytes_read = 0;
 
     if (0 == m_TRIGMode)
     {
         bytes_read = recv(m_sockfd, m_read_buf + m_read_idx, READ_BUFFER_SIZE - m_read_idx, 0);
-        m_read_idx += bytes_read;
-
         if (bytes_read <= 0)
         {
             return false;
         }
-
+        m_read_idx += bytes_read;
         return true;
     }
     else
     {
-        while (true)
+        bool got_data = false;
+        while (m_read_idx < READ_BUFFER_SIZE)
         {
             bytes_read = recv(m_sockfd, m_read_buf + m_read_idx, READ_BUFFER_SIZE - m_read_idx, 0);
             if (bytes_read == -1)
@@ -204,11 +206,12 @@ bool http_conn::read_once()
             }
             else if (bytes_read == 0)
             {
-                return false;
+                return got_data;
             }
             m_read_idx += bytes_read;
+            got_data = true;
         }
-        return true;
+        return got_data || m_read_idx >= READ_BUFFER_SIZE;
     }
 }
 
@@ -275,6 +278,12 @@ http_conn::HTTP_CODE http_conn::parse_headers(char *text)
     {
         if (m_content_length != 0)
         {
+            // Body must fit in the remaining read buffer (plus room to NUL-terminate).
+            if (m_content_length < 0 ||
+                m_checked_idx + m_content_length >= READ_BUFFER_SIZE)
+            {
+                return REQUEST_ENTITY_TOO_LARGE;
+            }
             m_check_state = CHECK_STATE_CONTENT;
             return NO_REQUEST;
         }
@@ -288,14 +297,33 @@ http_conn::HTTP_CODE http_conn::parse_headers(char *text)
         {
             m_linger = true;
         }
+        else if (strcasecmp(text, "close") == 0)
+        {
+            m_linger = false;
+        }
         m_request.headers["Connection"] = text;
     }
     else if (strncasecmp(text, "Content-length:", 15) == 0)
     {
         text += 15;
         text += strspn(text, " \t");
-        m_content_length = atol(text);
+        long length = 0;
+        if (!parse_content_length(text, &length))
+        {
+            return BAD_REQUEST;
+        }
+        // Absolute cap: body alone cannot exceed the read buffer.
+        if (length >= READ_BUFFER_SIZE)
+        {
+            return REQUEST_ENTITY_TOO_LARGE;
+        }
+        m_content_length = length;
         m_request.headers["Content-Length"] = text;
+    }
+    else if (is_unsupported_body_encoding_header(text))
+    {
+        // Unimplemented body encodings make request boundaries ambiguous.
+        return BAD_REQUEST;
     }
     else if (strncasecmp(text, "Host:", 5) == 0)
     {
@@ -353,6 +381,8 @@ http_conn::HTTP_CODE http_conn::process_read()
             ret = parse_headers(text);
             if (ret == BAD_REQUEST)
                 return BAD_REQUEST;
+            if (ret == REQUEST_ENTITY_TOO_LARGE)
+                return REQUEST_ENTITY_TOO_LARGE;
             else if (ret == GET_REQUEST)
             {
                 return GET_REQUEST;
@@ -370,6 +400,15 @@ http_conn::HTTP_CODE http_conn::process_read()
         default:
             return INTERNAL_ERROR;
         }
+    }
+    if (line_status == LINE_BAD)
+    {
+        return BAD_REQUEST;
+    }
+    // Incomplete request that already filled the buffer: reject, do not truncate.
+    if (m_read_idx >= READ_BUFFER_SIZE)
+    {
+        return REQUEST_ENTITY_TOO_LARGE;
     }
     return NO_REQUEST;
 }
@@ -413,7 +452,11 @@ bool http_conn::write()
 
         if (temp < 0)
         {
-            if (errno == EAGAIN)
+            if (errno == EINTR)
+            {
+                continue;
+            }
+            if (errno == EAGAIN || errno == EWOULDBLOCK)
             {
                 modfd(m_epollfd, m_sockfd, EPOLLOUT, m_TRIGMode);
                 return true;
@@ -464,6 +507,12 @@ void http_conn::process(uint64_t expected_generation)
     {
         resp.set_status(400);
         resp.set_json({{"error", "bad request"}});
+    }
+    else if (read_ret == REQUEST_ENTITY_TOO_LARGE)
+    {
+        resp.set_status(413);
+        resp.set_json({{"error", "request entity too large"}});
+        m_linger = false;
     }
     else if (read_ret == INTERNAL_ERROR)
     {

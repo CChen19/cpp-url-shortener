@@ -4,6 +4,7 @@
 
 Config::Config()
     : port(9006), thread_num(8), trig_mode(0), opt_linger(false), actor_model(0),
+      public_base_url("http://localhost:9006"),
       log_enabled(true), log_async(false), log_path("./ServerLog"),
       mysql_host("localhost"), mysql_port(3306), mysql_user("shorturl"),
       mysql_password("shorturl"), mysql_database("shorturl"), mysql_pool_size(8),
@@ -34,6 +35,9 @@ bool Config::load(const std::string& path)
             if (s["trig_mode"])   trig_mode   = s["trig_mode"].as<int>();
             if (s["opt_linger"])  opt_linger  = s["opt_linger"].as<bool>();
             if (s["actor_model"]) actor_model = s["actor_model"].as<int>();
+            if (s["public_base_url"]) {
+                public_base_url = s["public_base_url"].as<std::string>();
+            }
         }
 
         if (cfg["log"]) {

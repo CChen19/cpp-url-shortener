@@ -1,6 +1,8 @@
 #include "short_url_handler.h"
 #include "../analytics/click_event_producer.h"
 #include "../CGImysql/sql_connection_pool.h"
+#include "../config/config.h"
+#include "../http/protocol_utils.h"
 #include "../http/router.h"
 #include "../shorturl/base62.h"
 #include "../shorturl/short_url_cache.h"
@@ -11,15 +13,7 @@
 
 namespace {
 
-bool starts_with(const std::string& value, const std::string& prefix) {
-    return value.size() >= prefix.size() &&
-           value.compare(0, prefix.size(), prefix) == 0;
-}
-
-bool valid_long_url(const std::string& url) {
-    return url.size() >= 8 && url.size() <= 2048 &&
-           (starts_with(url, "http://") || starts_with(url, "https://"));
-}
+std::string g_public_base_url = "http://localhost:9006";
 
 bool valid_expire_at(const std::string& expire_at) {
     if (expire_at.size() != 19) {
@@ -39,22 +33,20 @@ bool valid_expire_at(const std::string& expire_at) {
     return true;
 }
 
-std::string header_or_empty(const HttpRequest& req, const std::string& name) {
-    auto it = req.headers.find(name);
-    return it == req.headers.end() ? "" : it->second;
+std::string build_short_url(const std::string& code) {
+    return join_public_base_url(g_public_base_url, code);
 }
 
-std::string build_short_url(const HttpRequest& req, const std::string& code) {
-    std::string host = header_or_empty(req, "Host");
-    if (host.empty()) {
-        return "/" + code;
+bool set_safe_location(HttpResponse& resp, const std::string& long_url) {
+    if (!is_http_url_safe_for_location(long_url)) {
+        resp.set_status(500);
+        resp.set_json({{"error", "stored long_url is unsafe for Location"}});
+        return false;
     }
-
-    std::string scheme = header_or_empty(req, "X-Forwarded-Proto");
-    if (scheme.empty()) {
-        scheme = "http";
-    }
-    return scheme + "://" + host + "/" + code;
+    resp.set_status(302);
+    resp.set_header("Location", long_url);
+    resp.set_body("");
+    return true;
 }
 
 void shorten(const HttpRequest& req, HttpResponse& resp) {
@@ -75,9 +67,10 @@ void shorten(const HttpRequest& req, HttpResponse& resp) {
     }
 
     const std::string long_url = payload["long_url"].get<std::string>();
-    if (!valid_long_url(long_url)) {
+    if (!is_http_url_safe_for_location(long_url)) {
         resp.set_status(400);
-        resp.set_json({{"error", "long_url must start with http:// or https://"}});
+        resp.set_json({{"error",
+            "long_url must be http(s) without control characters"}});
         return;
     }
 
@@ -127,7 +120,7 @@ void shorten(const HttpRequest& req, HttpResponse& resp) {
             resp.set_status(201);
             nlohmann::json body = {
                 {"short_code", record.short_code},
-                {"short_url", build_short_url(req, record.short_code)},
+                {"short_url", build_short_url(record.short_code)},
                 {"long_url", long_url}
             };
             body["expire_at"] = expire_at.empty() ? nlohmann::json(nullptr) : nlohmann::json(expire_at);
@@ -160,9 +153,7 @@ void redirect(const HttpRequest& req, HttpResponse& resp) {
         cache.get(code, &long_url, &cache_error);
     if (cache_status == ShortUrlCache::CacheStatus::Hit) {
         ClickEventProducer::instance().publish_click(req, code);
-        resp.set_status(302);
-        resp.set_header("Location", long_url);
-        resp.set_body("");
+        set_safe_location(resp, long_url);
         return;
     }
     if (cache_status == ShortUrlCache::CacheStatus::Filtered) {
@@ -177,9 +168,7 @@ void redirect(const HttpRequest& req, HttpResponse& resp) {
     cache_status = cache.get(code, &long_url, &cache_error);
     if (cache_status == ShortUrlCache::CacheStatus::Hit) {
         ClickEventProducer::instance().publish_click(req, code);
-        resp.set_status(302);
-        resp.set_header("Location", long_url);
-        resp.set_body("");
+        set_safe_location(resp, long_url);
         return;
     }
 
@@ -205,9 +194,7 @@ void redirect(const HttpRequest& req, HttpResponse& resp) {
             cache.add_legal_code(code);
         }
         ClickEventProducer::instance().publish_click(req, code);
-        resp.set_status(302);
-        resp.set_header("Location", long_url);
-        resp.set_body("");
+        set_safe_location(resp, long_url);
         return;
     }
     if (status == ShortUrlRepository::FindStatus::Expired) {
@@ -227,6 +214,12 @@ void redirect(const HttpRequest& req, HttpResponse& resp) {
 }
 
 } // namespace
+
+void init_short_url_handler(const Config& cfg) {
+    if (!cfg.public_base_url.empty()) {
+        g_public_base_url = cfg.public_base_url;
+    }
+}
 
 void register_short_url_routes() {
     Router::instance().post("/api/shorten", shorten);

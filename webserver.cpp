@@ -1,20 +1,50 @@
 #include "webserver.h"
 
 WebServer::WebServer()
+    : m_port(0), m_log_write(0), m_close_log(0), m_actormodel(0),
+      m_epollfd(-1), users(NULL), m_connPool(NULL), m_sql_num(0),
+      m_mysql_port(0), m_mysql_acquire_timeout_ms(50), m_pool(NULL),
+      m_thread_num(0), m_listenfd(-1), m_OPT_LINGER(0), m_TRIGMode(0),
+      m_LISTENTrigmode(0), m_CONNTrigmode(0), users_timer(NULL)
 {
     users = new http_conn[MAX_FD];
-    users_timer = new client_data[MAX_FD];
+    // Value-init so unused slots have sockfd==0; timer() overwrites live ones.
+    // Shutdown only closes slots with sockfd > 0 (0 is never a client fd here).
+    users_timer = new client_data[MAX_FD]();
+    m_pipefd[0] = -1;
+    m_pipefd[1] = -1;
 }
 
 WebServer::~WebServer()
 {
-    close(m_epollfd);
-    close(m_listenfd);
-    close(m_pipefd[1]);
-    close(m_pipefd[0]);
+    if (m_pool)
+    {
+        m_pool->stop();
+        delete m_pool;
+        m_pool = NULL;
+    }
+    if (m_epollfd >= 0)
+    {
+        close(m_epollfd);
+        m_epollfd = -1;
+    }
+    if (m_listenfd >= 0)
+    {
+        close(m_listenfd);
+        m_listenfd = -1;
+    }
+    if (m_pipefd[1] >= 0)
+    {
+        close(m_pipefd[1]);
+        m_pipefd[1] = -1;
+    }
+    if (m_pipefd[0] >= 0)
+    {
+        close(m_pipefd[0]);
+        m_pipefd[0] = -1;
+    }
     delete[] users;
     delete[] users_timer;
-    delete m_pool;
 }
 
 void WebServer::init(const Config &cfg)
@@ -145,6 +175,7 @@ void WebServer::eventListen()
     utils.addsig(SIGPIPE, SIG_IGN);
     utils.addsig(SIGALRM, utils.sig_handler, false);
     utils.addsig(SIGTERM, utils.sig_handler, false);
+    utils.addsig(SIGINT, utils.sig_handler, false);
 
     alarm(TIMESLOT);
 
@@ -264,6 +295,7 @@ bool WebServer::dealwithsignal(bool &timeout, bool &stop_server)
                 break;
             }
             case SIGTERM:
+            case SIGINT:
             {
                 stop_server = true;
                 break;
@@ -322,6 +354,48 @@ void WebServer::dealwithwrite(int sockfd)
     }
 }
 
+void WebServer::shutdown()
+{
+    // 1) Stop accept: remove listen fd from epoll and close it.
+    if (m_listenfd >= 0)
+    {
+        epoll_ctl(m_epollfd, EPOLL_CTL_DEL, m_listenfd, 0);
+        close(m_listenfd);
+        m_listenfd = -1;
+    }
+
+    // 2) Invalidate live slots so in-flight workers bail on generation checks
+    //    when they finish their current bounded work (MySQL acquire times out).
+    for (int fd = 0; fd < MAX_FD; ++fd)
+    {
+        if (users_timer[fd].sockfd > 0)
+        {
+            users[fd].invalidate();
+        }
+    }
+
+    // 3) Stop enqueue, drop queued tasks, wake + join workers (no detach).
+    if (m_pool)
+    {
+        m_pool->stop();
+    }
+
+    // 4) Close remaining connections on the event-loop thread.
+    for (int fd = 0; fd < MAX_FD; ++fd)
+    {
+        if (users_timer[fd].sockfd > 0)
+        {
+            deal_timer(users_timer[fd].timer, fd);
+        }
+    }
+
+    // 5) Destroy MySQL pool after workers have joined.
+    if (m_connPool)
+    {
+        m_connPool->DestroyPool();
+    }
+}
+
 void WebServer::eventLoop()
 {
     bool timeout = false;
@@ -375,4 +449,6 @@ void WebServer::eventLoop()
             timeout = false;
         }
     }
+
+    shutdown();
 }
