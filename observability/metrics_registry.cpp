@@ -25,7 +25,11 @@ MetricsRegistry& MetricsRegistry::instance() {
 
 MetricsRegistry::MetricsRegistry()
     : http_latency_buckets_(), http_latency_count_(0), http_latency_sum_(0.0),
-      kafka_publish_success_(0), kafka_publish_failure_(0) {}
+      kafka_publish_success_(0), kafka_publish_failure_(0),
+      kafka_enqueue_accepted_(0), kafka_enqueue_dropped_(0),
+      kafka_produce_accepted_(0), kafka_produce_failed_(0),
+      kafka_delivered_(0), kafka_delivery_failed_(0),
+      log_enqueue_accepted_(0), log_enqueue_dropped_(0) {}
 
 void MetricsRegistry::observe_http_request(const std::string& method,
                                            const std::string& route,
@@ -56,6 +60,100 @@ void MetricsRegistry::observe_kafka_publish(bool success) {
     } else {
         kafka_publish_failure_++;
     }
+}
+
+void MetricsRegistry::observe_kafka_enqueue(bool accepted) {
+    std::lock_guard<std::mutex> guard(mutex_);
+    if (accepted) {
+        kafka_enqueue_accepted_++;
+        kafka_publish_success_++;
+    } else {
+        kafka_enqueue_dropped_++;
+        kafka_publish_failure_++;
+    }
+}
+
+void MetricsRegistry::observe_kafka_produce_accepted(bool ok) {
+    std::lock_guard<std::mutex> guard(mutex_);
+    if (ok) {
+        kafka_produce_accepted_++;
+    } else {
+        kafka_produce_failed_++;
+    }
+}
+
+void MetricsRegistry::observe_kafka_delivery(bool success) {
+    std::lock_guard<std::mutex> guard(mutex_);
+    if (success) {
+        kafka_delivered_++;
+    } else {
+        kafka_delivery_failed_++;
+    }
+}
+
+void MetricsRegistry::observe_log_enqueue(bool accepted) {
+    std::lock_guard<std::mutex> guard(mutex_);
+    if (accepted) {
+        log_enqueue_accepted_++;
+    } else {
+        log_enqueue_dropped_++;
+    }
+}
+
+void MetricsRegistry::observe_origin_cap(const std::string& kind, bool acquired) {
+    std::lock_guard<std::mutex> guard(mutex_);
+    if (acquired) {
+        origin_cap_acquired_[kind]++;
+    } else {
+        origin_cap_rejected_[kind]++;
+    }
+}
+
+uint64_t MetricsRegistry::kafka_enqueue_dropped() const {
+    std::lock_guard<std::mutex> guard(mutex_);
+    return kafka_enqueue_dropped_;
+}
+
+uint64_t MetricsRegistry::kafka_produce_accepted() const {
+    std::lock_guard<std::mutex> guard(mutex_);
+    return kafka_produce_accepted_;
+}
+
+uint64_t MetricsRegistry::kafka_delivered() const {
+    std::lock_guard<std::mutex> guard(mutex_);
+    return kafka_delivered_;
+}
+
+uint64_t MetricsRegistry::log_enqueue_dropped() const {
+    std::lock_guard<std::mutex> guard(mutex_);
+    return log_enqueue_dropped_;
+}
+
+uint64_t MetricsRegistry::origin_cap_rejected(const std::string& kind) const {
+    std::lock_guard<std::mutex> guard(mutex_);
+    auto it = origin_cap_rejected_.find(kind);
+    return it == origin_cap_rejected_.end() ? 0 : it->second;
+}
+
+void MetricsRegistry::reset_for_test() {
+    std::lock_guard<std::mutex> guard(mutex_);
+    http_requests_.clear();
+    http_latency_buckets_.fill(0);
+    http_latency_count_ = 0;
+    http_latency_sum_ = 0.0;
+    cache_results_.clear();
+    kafka_publish_success_ = 0;
+    kafka_publish_failure_ = 0;
+    kafka_enqueue_accepted_ = 0;
+    kafka_enqueue_dropped_ = 0;
+    kafka_produce_accepted_ = 0;
+    kafka_produce_failed_ = 0;
+    kafka_delivered_ = 0;
+    kafka_delivery_failed_ = 0;
+    log_enqueue_accepted_ = 0;
+    log_enqueue_dropped_ = 0;
+    origin_cap_acquired_.clear();
+    origin_cap_rejected_.clear();
 }
 
 std::string MetricsRegistry::render_prometheus() {
@@ -98,12 +196,54 @@ std::string MetricsRegistry::render_prometheus() {
             << " " << item.second << "\n";
     }
 
-    out << "# HELP shorturl_kafka_publish_total Kafka click event publish attempts.\n";
+    out << "# HELP shorturl_kafka_publish_total Kafka click enqueue on request path "
+           "(accepted vs dropped/unavailable; not zero-loss).\n";
     out << "# TYPE shorturl_kafka_publish_total counter\n";
     out << "shorturl_kafka_publish_total" << labels({{"result", "success"}})
         << " " << kafka_publish_success_ << "\n";
     out << "shorturl_kafka_publish_total" << labels({{"result", "failure"}})
         << " " << kafka_publish_failure_ << "\n";
+
+    out << "# HELP shorturl_kafka_enqueue_total Bounded click-queue enqueue results.\n";
+    out << "# TYPE shorturl_kafka_enqueue_total counter\n";
+    out << "shorturl_kafka_enqueue_total" << labels({{"result", "accepted"}})
+        << " " << kafka_enqueue_accepted_ << "\n";
+    out << "shorturl_kafka_enqueue_total" << labels({{"result", "dropped"}})
+        << " " << kafka_enqueue_dropped_ << "\n";
+
+    out << "# HELP shorturl_kafka_produce_total Background rd_kafka_producev accept/fail.\n";
+    out << "# TYPE shorturl_kafka_produce_total counter\n";
+    out << "shorturl_kafka_produce_total" << labels({{"result", "accepted"}})
+        << " " << kafka_produce_accepted_ << "\n";
+    out << "shorturl_kafka_produce_total" << labels({{"result", "failed"}})
+        << " " << kafka_produce_failed_ << "\n";
+
+    out << "# HELP shorturl_kafka_delivery_total Kafka delivery-report callback outcomes.\n";
+    out << "# TYPE shorturl_kafka_delivery_total counter\n";
+    out << "shorturl_kafka_delivery_total" << labels({{"result", "success"}})
+        << " " << kafka_delivered_ << "\n";
+    out << "shorturl_kafka_delivery_total" << labels({{"result", "failure"}})
+        << " " << kafka_delivery_failed_ << "\n";
+
+    out << "# HELP shorturl_log_enqueue_total Bounded structured-log queue enqueue results.\n";
+    out << "# TYPE shorturl_log_enqueue_total counter\n";
+    out << "shorturl_log_enqueue_total" << labels({{"result", "accepted"}})
+        << " " << log_enqueue_accepted_ << "\n";
+    out << "shorturl_log_enqueue_total" << labels({{"result", "dropped"}})
+        << " " << log_enqueue_dropped_ << "\n";
+
+    out << "# HELP shorturl_origin_cap_total MySQL origin budget acquire results when Redis is down.\n";
+    out << "# TYPE shorturl_origin_cap_total counter\n";
+    for (const auto& item : origin_cap_acquired_) {
+        out << "shorturl_origin_cap_total"
+            << labels({{"kind", item.first}, {"result", "acquired"}})
+            << " " << item.second << "\n";
+    }
+    for (const auto& item : origin_cap_rejected_) {
+        out << "shorturl_origin_cap_total"
+            << labels({{"kind", item.first}, {"result", "rejected"}})
+            << " " << item.second << "\n";
+    }
 
     return out.str();
 }

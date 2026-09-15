@@ -130,3 +130,43 @@ if (REDIS_PLUS_PLUS_INCLUDE_DIR AND REDIS_PLUS_PLUS_LIBRARY AND HIREDIS_LIBRARY)
 endif()
 
 add_test(NAME local_cache COMMAND test_local_cache)
+
+add_executable(test_phase3_isolate
+    tests/test_phase3_isolate.cpp
+    analytics/click_event_producer.cpp
+    observability/structured_logger.cpp
+    observability/metrics_registry.cpp
+    shorturl/short_url_cache.cpp
+    shorturl/singleflight.cpp
+    shorturl/bloom_filter.cpp
+    shorturl/short_url_repository.cpp
+    shorturl/shard_router.cpp
+    shorturl/snowflake.cpp
+    shorturl/base62.cpp
+    config/config.cpp
+    CGImysql/sql_connection_pool.cpp
+    log/log.cpp
+)
+
+target_link_libraries(test_phase3_isolate
+    Threads::Threads
+    mysqlclient
+    yaml-cpp
+)
+
+if (REDIS_PLUS_PLUS_INCLUDE_DIR AND REDIS_PLUS_PLUS_LIBRARY AND HIREDIS_LIBRARY)
+    target_compile_definitions(test_phase3_isolate PRIVATE HAVE_REDIS_PLUS_PLUS)
+    target_include_directories(test_phase3_isolate PRIVATE ${REDIS_PLUS_PLUS_INCLUDE_DIR})
+    target_link_libraries(test_phase3_isolate
+        ${REDIS_PLUS_PLUS_LIBRARY}
+        ${HIREDIS_LIBRARY}
+    )
+endif()
+
+if (RDKAFKA_INCLUDE_DIR AND RDKAFKA_LIBRARY)
+    target_compile_definitions(test_phase3_isolate PRIVATE HAVE_RDKAFKA)
+    target_include_directories(test_phase3_isolate PRIVATE ${RDKAFKA_INCLUDE_DIR})
+    target_link_libraries(test_phase3_isolate ${RDKAFKA_LIBRARY})
+endif()
+
+add_test(NAME phase3_isolate COMMAND test_phase3_isolate)

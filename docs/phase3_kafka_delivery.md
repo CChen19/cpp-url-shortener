@@ -1,6 +1,10 @@
-# Phase 3 Kafka Async Delivery
+# Phase 3 Kafka Click Delivery (lossy bounded queue)
 
-Phase 3 目标：把点击统计从跳转主链路中异步化。用户访问 `GET /{code}` 时，主链路只做缓存/DB 查询、302 跳转和 Kafka 点击事件投递，不同步写点击 MySQL。
+Phase 3 keeps click stats off the redirect critical path. On `GET /{code}`, the
+request thread only copies click fields into an owned event and **bounded-enqueues**
+it. A background thread serializes JSON, calls `rd_kafka_producev`, and polls for
+delivery reports. A full queue **drops** the event and increments metrics — this
+is **not** zero-loss. Redirect must not block on Kafka or structured logs.
 
 ## 依赖
 

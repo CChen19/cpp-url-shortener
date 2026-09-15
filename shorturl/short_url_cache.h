@@ -5,7 +5,9 @@
 #include "singleflight.h"
 #include "../config/config.h"
 #include "../CGImysql/sql_connection_pool.h"
+#include <atomic>
 #include <chrono>
+#include <condition_variable>
 #include <cstddef>
 #include <cstdint>
 #include <deque>
@@ -13,6 +15,7 @@
 #include <mutex>
 #include <random>
 #include <string>
+#include <thread>
 #include <unordered_map>
 #include <vector>
 
@@ -102,6 +105,27 @@ private:
     std::vector<std::unique_ptr<Shard>> shards_;
 };
 
+// RAII slot for MySQL origin budgets while Redis is down.
+class OriginBudgetGuard {
+public:
+    OriginBudgetGuard() : cache_(nullptr), kind_(0), held_(false) {}
+    OriginBudgetGuard(class ShortUrlCache* cache, int kind, bool held);
+    ~OriginBudgetGuard();
+
+    OriginBudgetGuard(const OriginBudgetGuard&) = delete;
+    OriginBudgetGuard& operator=(const OriginBudgetGuard&) = delete;
+
+    OriginBudgetGuard(OriginBudgetGuard&& other) noexcept;
+    OriginBudgetGuard& operator=(OriginBudgetGuard&& other) noexcept;
+
+    bool held() const { return held_; }
+
+private:
+    class ShortUrlCache* cache_;
+    int kind_;
+    bool held_;
+};
+
 class ShortUrlCache {
 public:
     enum class CacheStatus {
@@ -114,6 +138,11 @@ public:
         Overload
     };
 
+    enum class OriginKind {
+        Redirect = 1,
+        Create = 2
+    };
+
     struct LookupValue {
         std::string long_url;
         std::string expire_at;
@@ -123,11 +152,14 @@ public:
 
     void init(const Config& config);
     bool warmup(connection_pool* pool, std::string* error = nullptr);
+    // Stop probe thread; safe to call from WebServer::shutdown.
+    void shutdown();
 
     // L1 only: never talks to Redis/MySQL. Used by handler before singleflight.
     CacheStatus get_local(const std::string& code, LookupValue* value);
 
-    // Redis L2 get/set. Values encode expire_at. Global mutex remains (phase 3).
+    // Redis L2 get/set. Uses redis++ ConnectionPool; does not hold the process
+    // mutex across network I/O. While Redis is down, L1 still serves hot keys.
     CacheStatus get_redis(const std::string& code, LookupValue* value,
                           std::string* error = nullptr);
     bool set(const std::string& code, const std::string& long_url,
@@ -153,6 +185,15 @@ public:
     bool enabled() const;
     bool redis_available() const;
 
+    // When Redis is unavailable, cap concurrent MySQL origin work. Excess → false
+    // (handler maps to 503). Separate budgets so create cannot starve redirect.
+    OriginBudgetGuard try_acquire_origin(OriginKind kind);
+
+    // Test hooks (no network).
+    void mark_redis_unavailable_for_test();
+    void simulate_probe_success_for_test();
+    void configure_origin_caps_for_test(int redirect_max, int create_max);
+
     // Redis wire format. Undecodable payloads are not Hits (no expire_at → Miss/refill).
     static std::string encode_redis_value(const std::string& long_url,
                                           const std::string& expire_at);
@@ -164,28 +205,53 @@ public:
                                                LookupValue* value);
 
 private:
+    friend class OriginBudgetGuard;
+
     ShortUrlCache();
+    ~ShortUrlCache();
 
     int ttl_with_jitter();
     std::string cache_key(const std::string& code) const;
+    void mark_redis_unavailable(const std::string& reason);
+    void restore_redis_available();
+    void ensure_probe_started();
+    void probe_loop();
+    void release_origin(OriginKind kind);
+
+#ifdef HAVE_REDIS_PLUS_PLUS
+    std::shared_ptr<sw::redis::Redis> redis_snapshot();
+#endif
 
     bool enabled_;
-    bool redis_available_;
+    std::atomic<bool> redis_available_;
     bool bloom_ready_;
     bool bloom_hard_filter_;
     int ttl_seconds_;
     int ttl_jitter_seconds_;
     int bloom_bits_;
     int bloom_hashes_;
+    int redis_probe_interval_ms_;
+    int origin_redirect_max_;
+    int origin_create_max_;
+    std::atomic<int> origin_redirect_inflight_;
+    std::atomic<int> origin_create_inflight_;
 
+    // Short critical sections only: availability flips, redis_ shared_ptr, RNG.
     mutable std::mutex mutex_;
+    mutable std::mutex rng_mutex_;
     std::mt19937 rng_;
     BloomFilter bloom_;
     SingleFlight singleflight_;
     LocalUrlCache local_;
 
+    std::atomic<bool> probe_stop_;
+    std::atomic<bool> probe_running_;
+    std::mutex probe_mutex_;
+    std::condition_variable probe_cv_;
+    std::thread probe_thread_;
+
 #ifdef HAVE_REDIS_PLUS_PLUS
-    std::unique_ptr<sw::redis::Redis> redis_;
+    std::shared_ptr<sw::redis::Redis> redis_;
 #endif
 };
 

@@ -36,6 +36,8 @@ public:
     std::string redis_uri;
     int redis_connect_timeout_ms;
     int redis_socket_timeout_ms;
+    int redis_pool_size;
+    int redis_probe_interval_ms;
     int cache_ttl_seconds;
     int cache_ttl_jitter_seconds;
     int bloom_bits;
@@ -49,6 +51,10 @@ public:
     int local_negative_ttl_seconds;
     int singleflight_max_inflight;
     int singleflight_max_waiters_per_key;
+    // Concurrent MySQL origin budgets while Redis is unavailable (separate so
+    // create cannot starve redirect refill).
+    int origin_redirect_max_concurrent;
+    int origin_create_max_concurrent;
 
     bool kafka_enabled;
     std::string kafka_brokers;
@@ -56,6 +62,8 @@ public:
     int kafka_message_timeout_ms;
     int kafka_linger_ms;
     int kafka_retries;
+    int kafka_queue_size;
+    int kafka_shutdown_timeout_ms;
 
     bool sharding_enabled;
     std::string shard_database_prefix;
@@ -65,6 +73,8 @@ public:
 
     bool structured_log_enabled;
     std::string structured_log_path;
+    int structured_log_queue_size;
+    int structured_log_shutdown_timeout_ms;
 
     int close_log;
 };
