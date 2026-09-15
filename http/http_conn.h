@@ -70,6 +70,8 @@ public:
     void process();
     bool read_once();
     bool write();
+    // Best-effort 503 for queue-full on the event-loop thread; caller closes fd.
+    void reject_overload();
     sockaddr_in *get_address()
     {
         return &m_address;

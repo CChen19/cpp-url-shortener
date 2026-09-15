@@ -59,6 +59,7 @@ public:
     int m_sql_num;
     string m_mysql_host;
     int m_mysql_port;
+    int m_mysql_acquire_timeout_ms;
 
     threadpool<http_conn> *m_pool;
     int m_thread_num;

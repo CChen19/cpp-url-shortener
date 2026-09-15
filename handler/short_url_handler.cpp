@@ -1,5 +1,6 @@
 #include "short_url_handler.h"
 #include "../analytics/click_event_producer.h"
+#include "../CGImysql/sql_connection_pool.h"
 #include "../http/router.h"
 #include "../shorturl/base62.h"
 #include "../shorturl/short_url_cache.h"
@@ -95,8 +96,17 @@ void shorten(const HttpRequest& req, HttpResponse& resp) {
         }
     }
 
+    MYSQL* mysql = nullptr;
+    connectionRAII mysqlcon(&mysql, connection_pool::GetInstance());
+    if (!mysql) {
+        resp.set_status(503);
+        resp.set_json({{"error", "short url storage unavailable"},
+                       {"detail", "mysql connection unavailable"}});
+        return;
+    }
+
     static SnowflakeIdGenerator generator;
-    ShortUrlRepository repo(req.mysql);
+    ShortUrlRepository repo(mysql);
 
     std::string db_error;
     for (int i = 0; i < 3; ++i) {
@@ -173,7 +183,16 @@ void redirect(const HttpRequest& req, HttpResponse& resp) {
         return;
     }
 
-    ShortUrlRepository repo(req.mysql);
+    MYSQL* mysql = nullptr;
+    connectionRAII mysqlcon(&mysql, connection_pool::GetInstance());
+    if (!mysql) {
+        resp.set_status(503);
+        resp.set_json({{"error", "short url storage unavailable"},
+                       {"detail", "mysql connection unavailable"}});
+        return;
+    }
+
+    ShortUrlRepository repo(mysql);
     std::string db_error;
     bool cacheable = false;
     ShortUrlRepository::FindStatus status =

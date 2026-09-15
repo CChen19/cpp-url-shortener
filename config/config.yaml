@@ -18,6 +18,9 @@ mysql:
   password: "shorturl"
   database: "shorturl"
   pool_size: 8
+  # Fail GetConnection instead of blocking forever when the pool is exhausted.
+  # Keep short (50-100ms): redirect/create should shed load rather than pile up.
+  acquire_timeout_ms: 50
 
 redis:
   enabled: true

@@ -62,6 +62,28 @@ void http_conn::close_conn(bool real_close)
     }
 }
 
+void http_conn::reject_overload()
+{
+    if (m_sockfd < 0)
+    {
+        return;
+    }
+    static const char kBody[] = "{\"error\":\"service unavailable\"}";
+    char response[256];
+    int n = snprintf(response, sizeof(response),
+                     "HTTP/1.1 503 Service Unavailable\r\n"
+                     "Content-Type: application/json\r\n"
+                     "Connection: close\r\n"
+                     "Content-Length: %zu\r\n"
+                     "\r\n"
+                     "%s",
+                     sizeof(kBody) - 1, kBody);
+    if (n > 0)
+    {
+        send(m_sockfd, response, static_cast<size_t>(n), MSG_NOSIGNAL);
+    }
+}
+
 void http_conn::init(int sockfd, const sockaddr_in &addr, int TRIGMode, int close_log)
 {
     m_sockfd = sockfd;
@@ -421,7 +443,7 @@ void http_conn::process()
     }
     else
     {
-        m_request.mysql = mysql;
+        m_request.mysql = nullptr;
         if (!Router::instance().dispatch(m_request, resp))
         {
             m_request.route_pattern = "unmatched";
