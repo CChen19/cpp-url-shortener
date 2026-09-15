@@ -217,8 +217,21 @@ int Utils::u_epollfd = 0;
 class Utils;
 void cb_func(client_data *user_data)
 {
-    epoll_ctl(Utils::u_epollfd, EPOLL_CTL_DEL, user_data->sockfd, 0);
     assert(user_data);
+    if (user_data->sockfd < 0)
+    {
+        return;
+    }
+    // Invalidate before close so in-flight workers cannot apply a stale result
+    // to this fd/slot after reuse. Runs on the event-loop thread (timer tick or
+    // deal_timer), never from workers.
+    if (user_data->conn)
+    {
+        user_data->conn->invalidate();
+    }
+    epoll_ctl(Utils::u_epollfd, EPOLL_CTL_DEL, user_data->sockfd, 0);
     close(user_data->sockfd);
+    user_data->sockfd = -1;
     http_conn::m_user_count--;
+    user_data->timer = NULL;
 }

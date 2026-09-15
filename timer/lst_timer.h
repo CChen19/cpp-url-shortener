@@ -25,12 +25,14 @@
 #include "../log/log.h"
 
 class util_timer;
+class http_conn;
 
 struct client_data
 {
     sockaddr_in address;
     int sockfd;
     util_timer *timer;
+    http_conn *conn;
 };
 
 class util_timer
