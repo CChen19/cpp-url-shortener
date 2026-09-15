@@ -23,7 +23,8 @@ flowchart LR
 - Short URL creation and `302` redirect APIs.
 - Snowflake ID to Base62 short code generation.
 - Redis Cache-Aside with Bloom Filter, singleflight rebuild, and TTL jitter.
-- Kafka async click pipeline with idempotent consumer writes.
+- Kafka click pipeline: request path bounded-enqueues owned events; background
+  produce/poll. Queue-full drops are counted (not zero-loss). Idempotent consumer writes.
 - Thin C++ sharding router over MySQL: `short_code` hash to `4 DB x 4 tables`.
 - Prometheus metrics for QPS, P99 latency, cache hit ratio, Kafka publish status, and consumer lag.
 - JSONL structured access logs.

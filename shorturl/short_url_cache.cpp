@@ -300,6 +300,39 @@ size_t LocalUrlCache::negative_bytes() const {
 }
 
 // ---------------------------------------------------------------------------
+// OriginBudgetGuard
+// ---------------------------------------------------------------------------
+
+OriginBudgetGuard::OriginBudgetGuard(ShortUrlCache* cache, int kind, bool held)
+    : cache_(cache), kind_(kind), held_(held) {}
+
+OriginBudgetGuard::~OriginBudgetGuard() {
+    if (held_ && cache_) {
+        cache_->release_origin(static_cast<ShortUrlCache::OriginKind>(kind_));
+    }
+}
+
+OriginBudgetGuard::OriginBudgetGuard(OriginBudgetGuard&& other) noexcept
+    : cache_(other.cache_), kind_(other.kind_), held_(other.held_) {
+    other.held_ = false;
+    other.cache_ = nullptr;
+}
+
+OriginBudgetGuard& OriginBudgetGuard::operator=(OriginBudgetGuard&& other) noexcept {
+    if (this != &other) {
+        if (held_ && cache_) {
+            cache_->release_origin(static_cast<ShortUrlCache::OriginKind>(kind_));
+        }
+        cache_ = other.cache_;
+        kind_ = other.kind_;
+        held_ = other.held_;
+        other.held_ = false;
+        other.cache_ = nullptr;
+    }
+    return *this;
+}
+
+// ---------------------------------------------------------------------------
 // ShortUrlCache
 // ---------------------------------------------------------------------------
 
@@ -311,51 +344,108 @@ ShortUrlCache& ShortUrlCache::instance() {
 ShortUrlCache::ShortUrlCache()
     : enabled_(false), redis_available_(false), bloom_ready_(false),
       bloom_hard_filter_(false), ttl_seconds_(3600), ttl_jitter_seconds_(300),
-      bloom_bits_(1048576), bloom_hashes_(7),
+      bloom_bits_(1048576), bloom_hashes_(7), redis_probe_interval_ms_(1000),
+      origin_redirect_max_(64), origin_create_max_(32),
+      origin_redirect_inflight_(0), origin_create_inflight_(0),
       rng_(static_cast<unsigned>(
-          std::chrono::steady_clock::now().time_since_epoch().count())) {}
+          std::chrono::steady_clock::now().time_since_epoch().count())),
+      probe_stop_(false), probe_running_(false) {}
+
+ShortUrlCache::~ShortUrlCache() {
+    shutdown();
+}
 
 void ShortUrlCache::init(const Config& config) {
-    std::lock_guard<std::mutex> guard(mutex_);
+    shutdown();
 
-    enabled_ = config.redis_enabled;
-    redis_available_ = false;
-    bloom_ready_ = false;
-    bloom_hard_filter_ = config.bloom_hard_filter;
-    ttl_seconds_ = std::max(1, config.cache_ttl_seconds);
-    ttl_jitter_seconds_ = std::max(0, config.cache_ttl_jitter_seconds);
-    bloom_bits_ = std::max(8, config.bloom_bits);
-    bloom_hashes_ = std::max(1, config.bloom_hashes);
-    bloom_.reset(bloom_bits_, bloom_hashes_);
+    bool need_probe = false;
+#ifdef HAVE_REDIS_PLUS_PLUS
+    std::shared_ptr<sw::redis::Redis> boot_client;
+#endif
 
-    local_.configure(static_cast<size_t>(std::max(1, config.local_cache_shards)),
-                     static_cast<size_t>(std::max(1024, config.local_positive_bytes)),
-                     static_cast<size_t>(std::max(1024, config.local_negative_bytes)),
-                     ttl_seconds_,
-                     ttl_jitter_seconds_,
-                     std::max(1, config.local_negative_ttl_seconds));
+    {
+        std::lock_guard<std::mutex> guard(mutex_);
 
-    singleflight_.configure(
-        static_cast<size_t>(std::max(1, config.singleflight_max_inflight)),
-        static_cast<size_t>(std::max(1, config.singleflight_max_waiters_per_key)));
+        enabled_ = config.redis_enabled;
+        redis_available_.store(false);
+        bloom_ready_ = false;
+        bloom_hard_filter_ = config.bloom_hard_filter;
+        ttl_seconds_ = std::max(1, config.cache_ttl_seconds);
+        ttl_jitter_seconds_ = std::max(0, config.cache_ttl_jitter_seconds);
+        bloom_bits_ = std::max(8, config.bloom_bits);
+        bloom_hashes_ = std::max(1, config.bloom_hashes);
+        redis_probe_interval_ms_ = std::max(100, config.redis_probe_interval_ms);
+        origin_redirect_max_ = std::max(1, config.origin_redirect_max_concurrent);
+        origin_create_max_ = std::max(1, config.origin_create_max_concurrent);
+        origin_redirect_inflight_.store(0);
+        origin_create_inflight_.store(0);
+        bloom_.reset(bloom_bits_, bloom_hashes_);
+        probe_stop_.store(false);
 
-    if (!enabled_) {
-        return;
+        local_.configure(static_cast<size_t>(std::max(1, config.local_cache_shards)),
+                         static_cast<size_t>(std::max(1024, config.local_positive_bytes)),
+                         static_cast<size_t>(std::max(1024, config.local_negative_bytes)),
+                         ttl_seconds_,
+                         ttl_jitter_seconds_,
+                         std::max(1, config.local_negative_ttl_seconds));
+
+        singleflight_.configure(
+            static_cast<size_t>(std::max(1, config.singleflight_max_inflight)),
+            static_cast<size_t>(std::max(1, config.singleflight_max_waiters_per_key)));
+
+#ifdef HAVE_REDIS_PLUS_PLUS
+        redis_.reset();
+#endif
+
+        if (!enabled_) {
+            return;
+        }
+
+#ifdef HAVE_REDIS_PLUS_PLUS
+        try {
+            sw::redis::ConnectionOptions options;
+            fill_redis_options(config.redis_uri, &options);
+            options.connect_timeout =
+                std::chrono::milliseconds(config.redis_connect_timeout_ms);
+            options.socket_timeout =
+                std::chrono::milliseconds(config.redis_socket_timeout_ms);
+
+            sw::redis::ConnectionPoolOptions pool_opts;
+            pool_opts.size =
+                static_cast<std::size_t>(std::max(1, config.redis_pool_size));
+            pool_opts.wait_timeout = std::chrono::milliseconds(
+                std::max(1, config.redis_socket_timeout_ms));
+
+            // Install the client before ping. On ping failure we keep it so the
+            // probe can PING the same handle (do not reset the only client).
+            redis_ = std::make_shared<sw::redis::Redis>(options, pool_opts);
+            boot_client = redis_;
+        } catch (const sw::redis::Error&) {
+            redis_.reset();
+            redis_available_.store(false);
+            // Constructor failed: no client to probe. L1 still serves hot keys.
+        }
+#endif
     }
 
 #ifdef HAVE_REDIS_PLUS_PLUS
-    try {
-        sw::redis::ConnectionOptions options;
-        fill_redis_options(config.redis_uri, &options);
-        options.connect_timeout = std::chrono::milliseconds(config.redis_connect_timeout_ms);
-        options.socket_timeout = std::chrono::milliseconds(config.redis_socket_timeout_ms);
-        redis_.reset(new sw::redis::Redis(options));
-        redis_->ping();
-        redis_available_ = true;
-    } catch (const sw::redis::Error&) {
-        redis_.reset();
-        redis_available_ = false;
+    // Ping outside mutex_ (same rule as request-path Redis I/O).
+    if (boot_client) {
+        try {
+            boot_client->ping();
+            redis_available_.store(true);
+        } catch (const sw::redis::Error&) {
+            // Keep redis_; mark unavailable; probe PING can restore later.
+            redis_available_.store(false);
+            need_probe = true;
+        }
     }
+
+    if (need_probe) {
+        ensure_probe_started();
+    }
+#else
+    (void)need_probe;
 #endif
 }
 
@@ -382,6 +472,15 @@ bool ShortUrlCache::warmup(connection_pool* pool, std::string* error) {
     }
     bloom_ready_ = true;
     return true;
+}
+
+void ShortUrlCache::shutdown() {
+    probe_stop_.store(true);
+    probe_cv_.notify_all();
+    if (probe_thread_.joinable()) {
+        probe_thread_.join();
+    }
+    probe_running_.store(false);
 }
 
 ShortUrlCache::CacheStatus
@@ -412,6 +511,90 @@ ShortUrlCache::get_local(const std::string& code, LookupValue* value) {
     return CacheStatus::Miss;
 }
 
+#ifdef HAVE_REDIS_PLUS_PLUS
+std::shared_ptr<sw::redis::Redis> ShortUrlCache::redis_snapshot() {
+    std::lock_guard<std::mutex> guard(mutex_);
+    if (!redis_available_.load() || !redis_) {
+        return std::shared_ptr<sw::redis::Redis>();
+    }
+    return redis_;
+}
+#endif
+
+void ShortUrlCache::mark_redis_unavailable(const std::string& /*reason*/) {
+    bool was = redis_available_.exchange(false);
+    if (was) {
+        MetricsRegistry::instance().observe_cache_result("redis_marked_down");
+    }
+    ensure_probe_started();
+}
+
+void ShortUrlCache::restore_redis_available() {
+    redis_available_.store(true);
+    MetricsRegistry::instance().observe_cache_result("redis_recovered");
+}
+
+void ShortUrlCache::ensure_probe_started() {
+#ifdef HAVE_REDIS_PLUS_PLUS
+    if (!enabled_) {
+        return;
+    }
+    bool expected = false;
+    if (!probe_running_.compare_exchange_strong(expected, true)) {
+        probe_cv_.notify_all();
+        return;
+    }
+    if (probe_thread_.joinable()) {
+        probe_thread_.join();
+    }
+    probe_stop_.store(false);
+    probe_thread_ = std::thread([this]() { probe_loop(); });
+#else
+    (void)0;
+#endif
+}
+
+void ShortUrlCache::probe_loop() {
+#ifdef HAVE_REDIS_PLUS_PLUS
+    while (!probe_stop_.load()) {
+        {
+            std::unique_lock<std::mutex> lock(probe_mutex_);
+            probe_cv_.wait_for(
+                lock, std::chrono::milliseconds(redis_probe_interval_ms_),
+                [this]() { return probe_stop_.load(); });
+        }
+        if (probe_stop_.load()) {
+            break;
+        }
+        if (redis_available_.load()) {
+            continue;
+        }
+
+        std::shared_ptr<sw::redis::Redis> redis;
+        {
+            std::lock_guard<std::mutex> guard(mutex_);
+            redis = redis_;
+        }
+        if (!redis) {
+            // No client (constructor never succeeded). Cannot restore without
+            // recreating from stored options; init ping-fail keeps the client.
+            continue;
+        }
+
+        try {
+            // Probe I/O is outside the application mutex.
+            redis->ping();
+            restore_redis_available();
+        } catch (const sw::redis::Error&) {
+            // Stay unavailable; L1 continues serving hot keys.
+        }
+    }
+    probe_running_.store(false);
+#else
+    probe_running_.store(false);
+#endif
+}
+
 ShortUrlCache::CacheStatus
 ShortUrlCache::get_redis(const std::string& code, LookupValue* value,
                          std::string* error) {
@@ -421,14 +604,16 @@ ShortUrlCache::get_redis(const std::string& code, LookupValue* value,
     }
 
 #ifdef HAVE_REDIS_PLUS_PLUS
-    std::lock_guard<std::mutex> guard(mutex_);
-    if (!redis_available_ || !redis_) {
+    auto redis = redis_snapshot();
+    if (!redis) {
         MetricsRegistry::instance().observe_cache_result("redis_unavailable");
+        ensure_probe_started();
         return CacheStatus::Unavailable;
     }
 
     try {
-        auto raw = redis_->get(cache_key(code));
+        // Network I/O without holding mutex_.
+        auto raw = redis->get(cache_key(code));
         if (!raw) {
             MetricsRegistry::instance().observe_cache_result("redis_miss");
             return CacheStatus::Miss;
@@ -436,13 +621,12 @@ ShortUrlCache::get_redis(const std::string& code, LookupValue* value,
 
         const CacheStatus decoded = interpret_redis_payload(*raw, value);
         if (decoded == CacheStatus::Miss) {
-            // Undecodable / legacy plain URL: cannot carry expire_at → refill MySQL.
             MetricsRegistry::instance().observe_cache_result("redis_undecodable");
             return CacheStatus::Miss;
         }
         if (decoded == CacheStatus::Expired) {
             try {
-                redis_->del(cache_key(code));
+                redis->del(cache_key(code));
             } catch (const sw::redis::Error&) {
                 // Best-effort drop of expired mapping.
             }
@@ -452,7 +636,7 @@ ShortUrlCache::get_redis(const std::string& code, LookupValue* value,
         MetricsRegistry::instance().observe_cache_result("redis_hit");
         return CacheStatus::Hit;
     } catch (const sw::redis::Error& e) {
-        redis_available_ = false;
+        mark_redis_unavailable(e.what());
         if (error) *error = e.what();
         MetricsRegistry::instance().observe_cache_result("redis_unavailable");
         return CacheStatus::Unavailable;
@@ -476,17 +660,19 @@ bool ShortUrlCache::set(const std::string& code, const std::string& long_url,
     }
 
 #ifdef HAVE_REDIS_PLUS_PLUS
-    std::lock_guard<std::mutex> guard(mutex_);
-    if (!redis_available_ || !redis_) {
+    auto redis = redis_snapshot();
+    if (!redis) {
+        ensure_probe_started();
         return false;
     }
 
     try {
-        redis_->setex(cache_key(code), ttl_with_jitter(),
-                      encode_redis_value(long_url, expire_at));
+        const int ttl = ttl_with_jitter();
+        redis->setex(cache_key(code), ttl,
+                     encode_redis_value(long_url, expire_at));
         return true;
     } catch (const sw::redis::Error& e) {
-        redis_available_ = false;
+        mark_redis_unavailable(e.what());
         if (error) *error = e.what();
         return false;
     }
@@ -504,16 +690,17 @@ bool ShortUrlCache::erase(const std::string& code, std::string* error) {
     }
 
 #ifdef HAVE_REDIS_PLUS_PLUS
-    std::lock_guard<std::mutex> guard(mutex_);
-    if (!redis_available_ || !redis_) {
+    auto redis = redis_snapshot();
+    if (!redis) {
+        ensure_probe_started();
         return false;
     }
 
     try {
-        redis_->del(cache_key(code));
+        redis->del(cache_key(code));
         return true;
     } catch (const sw::redis::Error& e) {
-        redis_available_ = false;
+        mark_redis_unavailable(e.what());
         if (error) *error = e.what();
         return false;
     }
@@ -570,10 +757,84 @@ bool ShortUrlCache::enabled() const {
 }
 
 bool ShortUrlCache::redis_available() const {
-    return redis_available_;
+    return redis_available_.load();
+}
+
+OriginBudgetGuard ShortUrlCache::try_acquire_origin(OriginKind kind) {
+    // Caps apply only while Redis is unavailable so a Redis outage cannot
+    // dump every miss onto MySQL unbounded. When Redis is up, return held.
+    if (redis_available_.load()) {
+        MetricsRegistry::instance().observe_origin_cap(
+            kind == OriginKind::Create ? "create" : "redirect", true);
+        return OriginBudgetGuard(nullptr, static_cast<int>(kind), false);
+    }
+
+    const int max_slots =
+        kind == OriginKind::Create ? origin_create_max_ : origin_redirect_max_;
+    std::atomic<int>& inflight = kind == OriginKind::Create
+                                     ? origin_create_inflight_
+                                     : origin_redirect_inflight_;
+    const char* label = kind == OriginKind::Create ? "create" : "redirect";
+
+    int cur = inflight.load();
+    while (cur < max_slots) {
+        if (inflight.compare_exchange_weak(cur, cur + 1)) {
+            MetricsRegistry::instance().observe_origin_cap(label, true);
+            return OriginBudgetGuard(this, static_cast<int>(kind), true);
+        }
+    }
+    MetricsRegistry::instance().observe_origin_cap(label, false);
+    return OriginBudgetGuard(nullptr, static_cast<int>(kind), false);
+}
+
+void ShortUrlCache::release_origin(OriginKind kind) {
+    std::atomic<int>& inflight = kind == OriginKind::Create
+                                     ? origin_create_inflight_
+                                     : origin_redirect_inflight_;
+    inflight.fetch_sub(1);
+}
+
+void ShortUrlCache::mark_redis_unavailable_for_test() {
+    redis_available_.store(false);
+}
+
+bool ShortUrlCache::has_redis_client_for_test() const {
+#ifdef HAVE_REDIS_PLUS_PLUS
+    std::lock_guard<std::mutex> guard(mutex_);
+    return static_cast<bool>(redis_);
+#else
+    return false;
+#endif
+}
+
+bool ShortUrlCache::probe_restore_if_client_present_for_test() {
+    // Mirrors probe_loop's null-client gate without waiting on the interval.
+#ifdef HAVE_REDIS_PLUS_PLUS
+    std::shared_ptr<sw::redis::Redis> redis;
+    {
+        std::lock_guard<std::mutex> guard(mutex_);
+        redis = redis_;
+    }
+    if (!redis) {
+        return false;
+    }
+    restore_redis_available();
+    return true;
+#else
+    return false;
+#endif
+}
+
+void ShortUrlCache::configure_origin_caps_for_test(int redirect_max,
+                                                   int create_max) {
+    origin_redirect_max_ = std::max(1, redirect_max);
+    origin_create_max_ = std::max(1, create_max);
+    origin_redirect_inflight_.store(0);
+    origin_create_inflight_.store(0);
 }
 
 int ShortUrlCache::ttl_with_jitter() {
+    std::lock_guard<std::mutex> guard(rng_mutex_);
     if (ttl_jitter_seconds_ <= 0) {
         return ttl_seconds_;
     }

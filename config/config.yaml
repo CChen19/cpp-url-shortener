@@ -28,6 +28,8 @@ redis:
   uri: "tcp://127.0.0.1:6379"
   connect_timeout_ms: 200
   socket_timeout_ms: 200
+  pool_size: 8                 # redis++ ConnectionPool; do not hold app mutex across I/O
+  probe_interval_ms: 1000      # background PING while unavailable; L1 still serves hot keys
 
 cache:
   ttl_seconds: 3600
@@ -44,6 +46,9 @@ cache:
   local_negative_ttl_seconds: 30
   singleflight_max_inflight: 1024
   singleflight_max_waiters_per_key: 256
+  # Applied when Redis is unavailable so misses cannot dump unbounded onto MySQL.
+  origin_redirect_max_concurrent: 64
+  origin_create_max_concurrent: 32
 
 kafka:
   enabled: true
@@ -52,6 +57,9 @@ kafka:
   message_timeout_ms: 3000
   linger_ms: 5
   retries: 3
+  # Request path only enqueues; full queue drops (counted). Not zero-loss.
+  queue_size: 8192
+  shutdown_timeout_ms: 2000
 
 sharding:
   enabled: true
@@ -63,3 +71,6 @@ sharding:
 observability:
   structured_log_enabled: true
   structured_log_path: "./logs/access.jsonl"
+  # Request path enqueues owned lines; writer opens once. Full queue drops (counted).
+  structured_log_queue_size: 8192
+  structured_log_shutdown_timeout_ms: 1000

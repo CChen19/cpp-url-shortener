@@ -1,4 +1,7 @@
 #include "webserver.h"
+#include "./analytics/click_event_producer.h"
+#include "./observability/structured_logger.h"
+#include "./shorturl/short_url_cache.h"
 
 WebServer::WebServer()
     : m_port(0), m_log_write(0), m_close_log(0), m_actormodel(0),
@@ -379,6 +382,12 @@ void WebServer::shutdown()
     {
         m_pool->stop();
     }
+
+    // 3b) Stop analytics/log background threads after workers have joined so
+    //     no request path enqueues during flush. Bounded timeout; must not hang.
+    ClickEventProducer::instance().shutdown();
+    StructuredLogger::instance().shutdown();
+    ShortUrlCache::instance().shutdown();
 
     // 4) Close remaining connections on the event-loop thread.
     for (int fd = 0; fd < MAX_FD; ++fd)

@@ -99,6 +99,16 @@ void shorten(const HttpRequest& req, HttpResponse& resp) {
         }
     }
 
+    // Separate create budget so create cannot starve redirect refill when Redis is down.
+    OriginBudgetGuard create_budget =
+        ShortUrlCache::instance().try_acquire_origin(ShortUrlCache::OriginKind::Create);
+    if (!ShortUrlCache::instance().redis_available() && !create_budget.held()) {
+        resp.set_status(503);
+        resp.set_json({{"error", "short url storage unavailable"},
+                       {"detail", "create origin budget exhausted"}});
+        return;
+    }
+
     MYSQL* mysql = nullptr;
     connectionRAII mysqlcon(&mysql, connection_pool::GetInstance());
     if (!mysql) {
@@ -146,6 +156,15 @@ void shorten(const HttpRequest& req, HttpResponse& resp) {
 SingleFlightResult origin_lookup(ShortUrlCache& cache, const std::string& code) {
     SingleFlightResult out;
 
+    // Cap MySQL origin when Redis is down; excess → Overload/503 (not unbounded DB).
+    OriginBudgetGuard redirect_budget =
+        cache.try_acquire_origin(ShortUrlCache::OriginKind::Redirect);
+    if (!cache.redis_available() && !redirect_budget.held()) {
+        out.kind = SingleFlightResult::Kind::Overload;
+        out.error = "redirect origin budget exhausted";
+        return out;
+    }
+
     ShortUrlCache::LookupValue cached;
     ShortUrlCache::CacheStatus redis_status =
         cache.get_redis(code, &cached);
@@ -164,7 +183,7 @@ SingleFlightResult origin_lookup(ShortUrlCache& cache, const std::string& code) 
         return out;
     }
 
-    // Redis miss/unavailable: refill from MySQL. Do not hold Redis mutex here.
+    // Redis miss/unavailable: refill from MySQL. Redis I/O is not under app mutex.
     MYSQL* mysql = nullptr;
     connectionRAII mysqlcon(&mysql, connection_pool::GetInstance());
     if (!mysql) {
