@@ -135,11 +135,15 @@ cd build-linux && ctest --output-on-failure
 
 其中 `http_parse_e2e` 保护请求行解析（绝对形式 URI 不带路径时必须返回 400 而不是崩溃），`log_overflow` 保护日志行截断。两者均来自[2026-09-17 代码审查](docs/code_review_2026-09-17.md)，该审查修复了两个可远程触发的崩溃。
 
+[2026-09-18 代码审查](docs/code_review_2026-09-18.md)新增了四项测试：`http_pipelining`（keep-alive 连接上的管线化请求不得被丢弃）、`log_rotation_nullfp`（日志轮转 `fopen` 失败不得导致崩溃）、`config_rollback`（`Config::load` 失败不得留下半套生效的配置）以及 `snowflake_worker`（worker-id 位保证多实例 ID 不冲突）——共 12 项测试，全部通过。
+
 ## 已知问题
 
-[2026-09-17 代码审查](docs/code_review_2026-09-17.md)留下了九项暂缓问题（按严重度排序，附文件行号）：`EINTR` 导致的误关连接、accept 到的 fd 数值未校验 `MAX_FD`、JSONL 日志控制字符转义不全、重复 `Content-Length` 处理、遗留日志模块问题，以及若干更低严重度的备注。该清单即待办事项，欢迎认领修复。
+[2026-09-18 代码审查](docs/code_review_2026-09-18.md)修复了六个 P1 缺陷（EMFILE 下 accept 活锁、keep-alive 管线化请求被丢弃、日志轮转 `fputs(NULL)` 崩溃、配置加载失败留下半套生效配置、Kafka 消费者毒丸消息崩溃循环、Snowflake 跨实例 ID 碰撞），并维护当前的暂缓问题清单：包括 L1 缓存 stale-FIFO 提前淘汰、Bloom 误判率失控、singleflight 等待者无超时、日志析构竞态、`DestroyPool` 存在等待者等 P2 问题，以及若干 P3 加固建议——全部按严重度排序并附文件行号，详见该审查文档。[2026-09-17 审查](docs/code_review_2026-09-17.md)的九项暂缓问题中，日志 `fopen(NULL)` 崩溃已在本轮修复，其余八项仍保留在 09-18 清单中。该清单即待办事项，欢迎认领修复。
 
 ## 文档
+
+请从[文档索引](docs/README.md)开始——它给出了下述所有文档的导读。
 
 优化与测量文档（英文）：
 
@@ -148,6 +152,7 @@ cd build-linux && ctest --output-on-failure
 - [笔记本 / WSL2 实验](docs/laptop_wsl2_experiment.md)
 - [阶段 4 指标分片](docs/phase4_measured_metrics.md)
 - [2026-09-17 代码审查](docs/code_review_2026-09-17.md)
+- [2026-09-18 代码审查](docs/code_review_2026-09-18.md)
 
 原始产品说明（中文）：
 

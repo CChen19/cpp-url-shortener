@@ -165,16 +165,30 @@ Both came out of the
 [2026-09-17 code review](docs/code_review_2026-09-17.md), which fixed two
 remotely triggerable crashes.
 
+The [2026-09-18 code review](docs/code_review_2026-09-18.md) added four
+more: `http_pipelining` (keep-alive pipelined requests must not be dropped),
+`log_rotation_nullfp` (a failed log-rotation `fopen` must not crash),
+`config_rollback` (a failed `Config::load` must not leave a half-applied
+config), and `snowflake_worker` (worker-id bits keep multi-instance IDs
+distinct) — 12 targets in total, all passing.
+
 ## Known issues
 
-The [2026-09-17 code review](docs/code_review_2026-09-17.md) left nine
-deferred findings, severity-ordered with file:line: spurious connection close
-on `EINTR`, accepted fd values unchecked against `MAX_FD`, incomplete
-control-character escaping in the JSONL logger, duplicate `Content-Length`
-handling, legacy log-module issues, and a few lower-severity notes. That list
-is the backlog; fixes welcome.
+The [2026-09-18 code review](docs/code_review_2026-09-18.md) fixed six P1
+defects (EMFILE accept livelock, dropped pipelined keep-alive requests,
+log-rotation `fputs(NULL)` crash, half-applied config on load failure,
+Kafka consumer poison-pill crash loops, snowflake cross-instance ID
+collisions) and holds the current deferred backlog: P2 items such as
+stale-FIFO L1 cache eviction, bloom false-positive growth, singleflight
+waiters without timeout, the log destructor race, and `DestroyPool` with
+waiters, plus P3 hardening notes — all severity-ordered with file:line in
+the review. Of the [2026-09-17 review](docs/code_review_2026-09-17.md)'s
+nine deferred findings, the log `fopen(NULL)` crash is fixed; the other
+eight remain in the 09-18 backlog. That list is the backlog; fixes welcome.
 
 ## Documentation
+
+Start from the [docs index](docs/README.md) — it maps every document below.
 
 Optimization / measurement (English):
 
@@ -183,6 +197,7 @@ Optimization / measurement (English):
 - [Laptop / WSL2 experiment](docs/laptop_wsl2_experiment.md)
 - [Phase 4 metrics shards](docs/phase4_measured_metrics.md)
 - [Code review 2026-09-17](docs/code_review_2026-09-17.md)
+- [Code review 2026-09-18](docs/code_review_2026-09-18.md)
 
 Original product notes (Chinese):
 
