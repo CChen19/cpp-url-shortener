@@ -210,6 +210,53 @@ add_executable(test_log_overflow
 target_link_libraries(test_log_overflow Threads::Threads)
 add_test(NAME log_overflow COMMAND test_log_overflow)
 
+# Regression: pipelined requests must survive the keep-alive parser reset
+# (parse_content consumes the body; write() retains already-read request
+# bytes via retain_pipelined_bytes instead of wiping them with init()).
+add_executable(test_http_pipelining
+    tests/test_http_pipelining.cpp
+    http/http_conn.cpp
+    http/router.cpp
+    http/response.cpp
+    observability/metrics_registry.cpp
+    observability/structured_logger.cpp
+    config/config.cpp
+    CGImysql/sql_connection_pool.cpp
+    log/log.cpp
+)
+target_link_libraries(test_http_pipelining
+    Threads::Threads
+    mysqlclient
+    yaml-cpp
+)
+add_test(NAME http_pipelining COMMAND test_http_pipelining)
+
+# Regression: log rotation fopen failure must not fputs(NULL) (used to SEGV).
+# locker.h is header-only, so log/log.cpp + Threads is the full dependency set.
+add_executable(test_log_rotation_nullfp
+    tests/test_log_rotation_nullfp.cpp
+    log/log.cpp
+)
+target_link_libraries(test_log_rotation_nullfp Threads::Threads)
+add_test(NAME log_rotation_nullfp COMMAND test_log_rotation_nullfp)
+
+# Regression: Config::load failure must roll back to the pre-load snapshot
+# instead of leaving a half-default / half-file mix.
+add_executable(test_config_rollback
+    tests/test_config_rollback.cpp
+    config/config.cpp
+)
+target_link_libraries(test_config_rollback yaml-cpp)
+add_test(NAME config_rollback COMMAND test_config_rollback)
+
+# Regression: snowflake worker-id bits (layout, pinning, clamping, uniqueness).
+add_executable(test_snowflake_worker
+    tests/test_snowflake_worker.cpp
+    shorturl/snowflake.cpp
+)
+target_link_libraries(test_snowflake_worker Threads::Threads)
+add_test(NAME snowflake_worker COMMAND test_snowflake_worker)
+
 # In-process observe contention microbench (not a ctest; run manually for evidence).
 add_executable(bench_metrics_observe
     tests/bench_metrics_observe.cpp
