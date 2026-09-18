@@ -43,7 +43,10 @@ private:
         while (m_log_queue->pop(single_log))
         {
             m_mutex.lock();
-            fputs(single_log.c_str(), m_fp);
+            if (m_fp != NULL) // rotation open can fail; never fputs(NULL)
+            {
+                fputs(single_log.c_str(), m_fp);
+            }
             m_mutex.unlock();
         }
         return nullptr;

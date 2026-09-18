@@ -1,4 +1,5 @@
 #include <string.h>
+#include <errno.h>
 #include <time.h>
 #include <sys/time.h>
 #include <stdarg.h>
@@ -100,12 +101,16 @@ void Log::write_log(int level, const char *format, ...)
     m_mutex.lock();
     m_count++;
 
-    if (m_today != my_tm.tm_mday || m_count % m_split_lines == 0) //everyday log
+    if (m_fp == NULL || m_today != my_tm.tm_mday || m_count % m_split_lines == 0) //everyday log
     {
         
         char new_log[512] = {0};
-        fflush(m_fp);
-        fclose(m_fp);
+        if (m_fp != NULL)
+        {
+            fflush(m_fp);
+            fclose(m_fp);
+            m_fp = NULL;
+        }
         char tail[16] = {0};
        
         snprintf(tail, 16, "%d_%02d_%02d_", my_tm.tm_year + 1900, my_tm.tm_mon + 1, my_tm.tm_mday);
@@ -122,6 +127,15 @@ void Log::write_log(int level, const char *format, ...)
                      dir_name, tail, log_name, m_count / m_split_lines);
         }
         m_fp = fopen(new_log, "a");
+        if (m_fp == NULL)
+        {
+            // Rotation can fail (disk full, directory removed, fd exhaustion).
+            // Keep the process alive: this line goes to stderr and the next
+            // write retries the open. A NULL m_fp here used to crash the next
+            // fputs on the hot path.
+            fprintf(stderr, "log: fopen(%s) failed: %s\n",
+                    new_log, strerror(errno));
+        }
     }
  
     m_mutex.unlock();
@@ -171,7 +185,10 @@ void Log::write_log(int level, const char *format, ...)
     else
     {
         m_mutex.lock();
-        fputs(log_str.c_str(), m_fp);
+        if (m_fp != NULL)
+        {
+            fputs(log_str.c_str(), m_fp);
+        }
         m_mutex.unlock();
     }
 
