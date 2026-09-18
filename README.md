@@ -159,6 +159,21 @@ tarball (KRaft), not `docker run`.
 cd build-linux && ctest --output-on-failure
 ```
 
+`http_parse_e2e` guards the request-line parser (an absolute-form URI without
+a path must 400, not crash) and `log_overflow` guards log-line truncation.
+Both came out of the
+[2026-09-17 code review](docs/code_review_2026-09-17.md), which fixed two
+remotely triggerable crashes.
+
+## Known issues
+
+The [2026-09-17 code review](docs/code_review_2026-09-17.md) left nine
+deferred findings, severity-ordered with file:line: spurious connection close
+on `EINTR`, accepted fd values unchecked against `MAX_FD`, incomplete
+control-character escaping in the JSONL logger, duplicate `Content-Length`
+handling, legacy log-module issues, and a few lower-severity notes. That list
+is the backlog; fixes welcome.
+
 ## Documentation
 
 Optimization / measurement (English):
@@ -167,6 +182,7 @@ Optimization / measurement (English):
 - [Phase 0 harness](docs/phase0_baseline.md)
 - [Laptop / WSL2 experiment](docs/laptop_wsl2_experiment.md)
 - [Phase 4 metrics shards](docs/phase4_measured_metrics.md)
+- [Code review 2026-09-17](docs/code_review_2026-09-17.md)
 
 Original product notes (Chinese):
 

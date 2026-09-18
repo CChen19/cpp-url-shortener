@@ -178,6 +178,38 @@ add_executable(test_metrics_shards
 target_link_libraries(test_metrics_shards Threads::Threads)
 add_test(NAME metrics_shards COMMAND test_metrics_shards)
 
+# End-to-end regression for the request-line parser remote crash
+# (absolute-form URI without path used to SEGV in parse_request_line).
+add_executable(test_http_parse_e2e
+    tests/test_http_parse_e2e.cpp
+    http/http_conn.cpp
+    http/router.cpp
+    http/response.cpp
+    observability/metrics_registry.cpp
+    observability/structured_logger.cpp
+    config/config.cpp
+    CGImysql/sql_connection_pool.cpp
+    log/log.cpp
+)
+target_link_libraries(test_http_parse_e2e
+    Threads::Threads
+    mysqlclient
+    yaml-cpp
+)
+add_test(NAME http_parse_e2e COMMAND test_http_parse_e2e)
+
+# Regression for the Log::write_log heap overflow (line truncation).
+# Behavioral assertions: the pre-fix code wrote the full 4000-char payload and
+# heap corruption, so the size/run-length checks fail on the old code.
+# (AddressSanitizer proved the original overflow but is flaky on WSL2 — it
+# DEADLYSIGNAL-loops even on a hello-world binary — so it stays off in ctest.)
+add_executable(test_log_overflow
+    tests/test_log_overflow.cpp
+    log/log.cpp
+)
+target_link_libraries(test_log_overflow Threads::Threads)
+add_test(NAME log_overflow COMMAND test_log_overflow)
+
 # In-process observe contention microbench (not a ctest; run manually for evidence).
 add_executable(bench_metrics_observe
     tests/bench_metrics_observe.cpp

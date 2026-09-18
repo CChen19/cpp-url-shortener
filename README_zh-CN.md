@@ -133,6 +133,12 @@ Windows 游戏本（WSL2）上的实测记录见[笔记本 / WSL2 实验](docs/l
 cd build-linux && ctest --output-on-failure
 ```
 
+其中 `http_parse_e2e` 保护请求行解析（绝对形式 URI 不带路径时必须返回 400 而不是崩溃），`log_overflow` 保护日志行截断。两者均来自[2026-09-17 代码审查](docs/code_review_2026-09-17.md)，该审查修复了两个可远程触发的崩溃。
+
+## 已知问题
+
+[2026-09-17 代码审查](docs/code_review_2026-09-17.md)留下了九项暂缓问题（按严重度排序，附文件行号）：`EINTR` 导致的误关连接、accept 到的 fd 数值未校验 `MAX_FD`、JSONL 日志控制字符转义不全、重复 `Content-Length` 处理、遗留日志模块问题，以及若干更低严重度的备注。该清单即待办事项，欢迎认领修复。
+
 ## 文档
 
 优化与测量文档（英文）：
@@ -141,6 +147,7 @@ cd build-linux && ctest --output-on-failure
 - [阶段 0 压测工具](docs/phase0_baseline.md)
 - [笔记本 / WSL2 实验](docs/laptop_wsl2_experiment.md)
 - [阶段 4 指标分片](docs/phase4_measured_metrics.md)
+- [2026-09-17 代码审查](docs/code_review_2026-09-17.md)
 
 原始产品说明（中文）：
 

@@ -247,6 +247,13 @@ http_conn::HTTP_CODE http_conn::parse_request_line(char *text)
     {
         m_url += 7;
         m_url = strchr(m_url, '/');
+        // Absolute-form URI with no path ("GET http://host HTTP/1.1"):
+        // strchr returned NULL; reject here so the checks below never
+        // dereference it.
+        if (!m_url)
+        {
+            return BAD_REQUEST;
+        }
     }
 
     if (strncasecmp(m_url, "https://", 8) == 0)

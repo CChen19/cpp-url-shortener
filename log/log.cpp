@@ -136,8 +136,28 @@ void Log::write_log(int level, const char *format, ...)
     int n = snprintf(m_buf, 48, "%d-%02d-%02d %02d:%02d:%02d.%06ld %s ",
                      my_tm.tm_year + 1900, my_tm.tm_mon + 1, my_tm.tm_mday,
                      my_tm.tm_hour, my_tm.tm_min, my_tm.tm_sec, now.tv_usec, s);
-    
+
+    // Clamp both offsets: snprintf/vsnprintf return the would-be length, which
+    // exceeds the buffer on truncation. Writing at m_buf[n + m] then ran past
+    // m_log_buf_size (remote crash via a long request line).
+    if (n < 0)
+    {
+        n = 0;
+    }
+    else if (n > m_log_buf_size - 2)
+    {
+        n = m_log_buf_size - 2;
+    }
+
     int m = vsnprintf(m_buf + n, m_log_buf_size - n - 1, format, valst);
+    if (m < 0)
+    {
+        m = 0;
+    }
+    else if (m > m_log_buf_size - n - 2)
+    {
+        m = m_log_buf_size - n - 2;
+    }
     m_buf[n + m] = '\n';
     m_buf[n + m + 1] = '\0';
     log_str = m_buf;
