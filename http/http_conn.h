@@ -79,6 +79,9 @@ public:
     void process(uint64_t expected_generation);
     bool read_once();
     bool write();
+    // True when request bytes were already read past the parser cursor
+    // (pipelined / same-segment request waiting to be dispatched).
+    bool has_pipelined_input() const { return m_read_idx > m_checked_idx; }
     // Best-effort 503 for queue-full on the event-loop thread; caller closes fd.
     void reject_overload();
     sockaddr_in *get_address()
@@ -94,6 +97,9 @@ public:
 
 private:
     void init();
+    // Keep any already-received request bytes across the parser reset so a
+    // pipelined request is not silently dropped by init()'s buffer clear.
+    void retain_pipelined_bytes();
     HTTP_CODE process_read();
     bool process_write(const HttpResponse &resp);
     HTTP_CODE parse_request_line(char *text);

@@ -42,6 +42,10 @@ public:
     bool dealwithsignal(bool& timeout, bool& stop_server);
     void dealwithread(int sockfd);
     void dealwithwrite(int sockfd);
+    // fd-exhaustion backoff: stop accepting until the next timer tick so a
+    // level-triggered listen fd cannot hot-spin the event loop on EMFILE.
+    void pause_accept();
+    void resume_accept();
 
 public:
     int m_port;
@@ -74,6 +78,7 @@ public:
     int m_CONNTrigmode;
 
     client_data *users_timer;
+    bool m_listen_paused;
     Utils utils;
 };
 #endif

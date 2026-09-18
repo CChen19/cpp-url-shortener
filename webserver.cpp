@@ -8,7 +8,8 @@ WebServer::WebServer()
       m_epollfd(-1), users(NULL), m_connPool(NULL), m_sql_num(0),
       m_mysql_port(0), m_mysql_acquire_timeout_ms(50), m_pool(NULL),
       m_thread_num(0), m_listenfd(-1), m_OPT_LINGER(0), m_TRIGMode(0),
-      m_LISTENTrigmode(0), m_CONNTrigmode(0), users_timer(NULL)
+      m_LISTENTrigmode(0), m_CONNTrigmode(0), users_timer(NULL),
+      m_listen_paused(false)
 {
     users = new http_conn[MAX_FD];
     // Value-init so unused slots have sockfd==0; timer() overwrites live ones.
@@ -228,6 +229,24 @@ void WebServer::deal_timer(util_timer *timer, int sockfd)
     LOG_INFO("close fd %d", users_timer[sockfd].sockfd);
 }
 
+void WebServer::pause_accept()
+{
+    if (m_listen_paused)
+    {
+        return;
+    }
+    m_listen_paused = true;
+    epoll_ctl(m_epollfd, EPOLL_CTL_DEL, m_listenfd, 0);
+    LOG_ERROR("accept: fd exhaustion (EMFILE/ENFILE); pausing accept until next timer tick");
+}
+
+void WebServer::resume_accept()
+{
+    m_listen_paused = false;
+    utils.addfd(m_epollfd, m_listenfd, false, m_LISTENTrigmode);
+    LOG_INFO("%s", "accept: resuming after fd-exhaustion backoff");
+}
+
 bool WebServer::dealclientdata()
 {
     struct sockaddr_in client_address;
@@ -237,7 +256,17 @@ bool WebServer::dealclientdata()
         int connfd = accept(m_listenfd, (struct sockaddr *)&client_address, &client_addrlength);
         if (connfd < 0)
         {
-            LOG_ERROR("%s:errno is:%d", "accept error", errno);
+            if (errno == EMFILE || errno == ENFILE || errno == ENOBUFS || errno == ENOMEM)
+            {
+                // Without this, the level-triggered listen fd re-fires
+                // immediately and the loop hot-spins on a failing accept()
+                // while every retry floods the error log.
+                pause_accept();
+            }
+            else
+            {
+                LOG_ERROR("%s:errno is:%d", "accept error", errno);
+            }
             return false;
         }
         if (http_conn::m_user_count >= MAX_FD)
@@ -256,7 +285,14 @@ bool WebServer::dealclientdata()
             int connfd = accept(m_listenfd, (struct sockaddr *)&client_address, &client_addrlength);
             if (connfd < 0)
             {
-                LOG_ERROR("%s:errno is:%d", "accept error", errno);
+                if (errno == EMFILE || errno == ENFILE || errno == ENOBUFS || errno == ENOMEM)
+                {
+                    pause_accept();
+                }
+                else
+                {
+                    LOG_ERROR("%s:errno is:%d", "accept error", errno);
+                }
                 break;
             }
             if (http_conn::m_user_count >= MAX_FD)
@@ -345,6 +381,20 @@ void WebServer::dealwithwrite(int sockfd)
     if (users[sockfd].write())
     {
         LOG_INFO("send data to the client(%s)", inet_ntoa(users[sockfd].get_address()->sin_addr));
+
+        // A pipelined request may already be buffered; dispatch it now instead
+        // of waiting for new socket bytes that would never trigger epoll.
+        if (users[sockfd].has_pipelined_input())
+        {
+            const uint64_t gen = users[sockfd].current_generation();
+            if (!m_pool->append_p(users + sockfd, gen))
+            {
+                LOG_ERROR("thread pool queue full after write, rejecting fd %d", sockfd);
+                users[sockfd].reject_overload();
+                deal_timer(timer, sockfd);
+                return;
+            }
+        }
 
         if (timer)
         {
@@ -452,6 +502,11 @@ void WebServer::eventLoop()
         if (timeout)
         {
             utils.timer_handler();
+
+            if (m_listen_paused)
+            {
+                resume_accept();
+            }
 
             LOG_INFO("%s", "timer tick");
 

@@ -356,8 +356,9 @@ http_conn::HTTP_CODE http_conn::parse_content(char *text)
 {
     if (m_read_idx >= (m_content_length + m_checked_idx))
     {
-        text[m_content_length] = '\0';
         m_request.body = std::string(text, m_content_length);
+        // Consume the body so bytes after it parse as the next request.
+        m_checked_idx += m_content_length;
         return GET_REQUEST;
     }
     return NO_REQUEST;
@@ -436,6 +437,26 @@ bool http_conn::process_write(const HttpResponse &resp)
     return true;
 }
 
+void http_conn::retain_pipelined_bytes()
+{
+    const long checked = m_checked_idx;
+    const long leftover = m_read_idx - checked;
+    if (leftover > 0)
+    {
+        // init() clears the whole read buffer, and the source region overlaps
+        // it — so the unconsumed bytes must be staged outside first.
+        char saved[READ_BUFFER_SIZE];
+        memcpy(saved, m_read_buf + checked, static_cast<size_t>(leftover));
+        init();
+        memcpy(m_read_buf, saved, static_cast<size_t>(leftover));
+    }
+    else
+    {
+        init();
+    }
+    m_read_idx = leftover;
+}
+
 bool http_conn::write()
 {
     int temp = 0;
@@ -449,7 +470,7 @@ bool http_conn::write()
     if (bytes_to_send == 0)
     {
         modfd(m_epollfd, m_sockfd, EPOLLIN, m_TRIGMode);
-        init();
+        retain_pipelined_bytes();
         return true;
     }
 
@@ -482,7 +503,9 @@ bool http_conn::write()
 
             if (m_linger)
             {
-                init();
+                // Keep-alive: reset the parser but preserve any pipelined
+                // request bytes already sitting in the read buffer.
+                retain_pipelined_bytes();
                 return true;
             }
             else
