@@ -8,6 +8,7 @@
 #include "./observability/structured_logger.h"
 #include "./shorturl/short_url_cache.h"
 #include "./shorturl/shard_router.h"
+#include "./shorturl/snowflake.h"
 
 int main(int argc, char *argv[])
 {
@@ -19,6 +20,14 @@ int main(int argc, char *argv[])
 
     if (!config.load(config_path))
         fprintf(stderr, "Config load failed, using defaults\n");
+
+    if (config.snowflake_worker_id >= 0)
+    {
+        // Pin the id-worker bits across both generator instances (short codes
+        // and click event ids); default is pid-derived, which already keeps
+        // same-host instances apart.
+        SnowflakeIdGenerator::set_worker_id(config.snowflake_worker_id);
+    }
 
     ShardRouter::instance().init(config);
     StructuredLogger::instance().init(config);
