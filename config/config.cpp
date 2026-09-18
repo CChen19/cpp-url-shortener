@@ -29,6 +29,7 @@ Config::Config()
       sharding_enabled(true), shard_database_prefix("shorturl_"),
       shard_table_prefix("short_url_"), shard_database_count(4),
       shard_table_count(4),
+      snowflake_worker_id(-1),
       structured_log_enabled(true), structured_log_path("./logs/access.jsonl"),
       structured_log_queue_size(8192), structured_log_shutdown_timeout_ms(1000),
       close_log(0)
@@ -36,6 +37,10 @@ Config::Config()
 
 bool Config::load(const std::string& path)
 {
+    // Load-or-nothing: snapshot before any mutation so a YAML error part-way
+    // through cannot leave a half-parsed mix of defaults and overrides behind
+    // (main() would then run on that mix while claiming "using defaults").
+    const Config rollback = *this;
     try {
         YAML::Node cfg = YAML::LoadFile(path);
 
@@ -141,6 +146,11 @@ bool Config::load(const std::string& path)
             if (sh["table_count"])     shard_table_count     = sh["table_count"].as<int>();
         }
 
+        if (cfg["snowflake"]) {
+            auto sf = cfg["snowflake"];
+            if (sf["worker_id"]) snowflake_worker_id = sf["worker_id"].as<int>();
+        }
+
         if (cfg["observability"]) {
             auto obs = cfg["observability"];
             if (obs["structured_log_enabled"]) {
@@ -161,6 +171,7 @@ bool Config::load(const std::string& path)
         return true;
     } catch (const YAML::Exception& e) {
         fprintf(stderr, "Failed to load config '%s': %s\n", path.c_str(), e.what());
+        *this = rollback;
         return false;
     }
 }

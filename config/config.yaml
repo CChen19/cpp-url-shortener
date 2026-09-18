@@ -68,6 +68,11 @@ sharding:
   database_count: 4
   table_count: 4
 
+snowflake:
+  # Worker-id bits keep multi-instance IDs distinct. -1 (default) derives
+  # the id from the pid; pin it (0..1023) for managed deployments.
+  worker_id: -1
+
 observability:
   structured_log_enabled: true
   structured_log_path: "./logs/access.jsonl"

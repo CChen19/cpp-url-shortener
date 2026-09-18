@@ -71,6 +71,10 @@ public:
     int shard_database_count;
     int shard_table_count;
 
+    // Snowflake worker id: -1 = derive from pid (default); 0..1023 pins it.
+    // Two instances minting ids in the same second must not collide.
+    int snowflake_worker_id;
+
     bool structured_log_enabled;
     std::string structured_log_path;
     int structured_log_queue_size;
